@@ -249,12 +249,11 @@ impl InstanceEntry {
         let contains_loader = lower.contains(&loader_string_lower);
 
         let contains_minecraft_version = if let Some(index) = lower.find(self.configuration.minecraft_version.as_str()) {
-            dbg!(&lower);
             let lower_bytes = lower.as_bytes();
             let next = index + self.configuration.minecraft_version.len();
-            if index > 0 && is_version_continuation(dbg!(lower_bytes[index-1])) {
+            if index > 0 && is_version_continuation(lower_bytes[index-1]) {
                 false
-            } else if next < lower_bytes.len() && is_version_continuation(dbg!(lower_bytes[next])) {
+            } else if next < lower_bytes.len() && is_version_continuation(lower_bytes[next]) {
                 false
             } else {
                 true
