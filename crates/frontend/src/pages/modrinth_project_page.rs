@@ -1,6 +1,6 @@
 use std::sync::{Arc};
 
-use bridge::{instance::{InstanceID}, message::{AtomicBridgeDataLoadState, MessageToBackend}, meta::MetadataRequest, serial::AtomicOptionSerial};
+use bridge::{instance::InstanceID, message::{BridgeDataLoadState, MessageToBackend}, meta::MetadataRequest, serial::AtomicOptionSerial};
 use gpui::{prelude::*, *};
 use gpui_component::{
     ActiveTheme, Icon, StyledExt, WindowExt, button::{Button, ButtonVariants}, h_flex, notification::NotificationType, skeleton::Skeleton, tab::{Tab, TabBar}, text::TextView, v_flex
@@ -27,7 +27,7 @@ pub struct ModrinthProjectPage {
     active_tab: usize,
     can_install_latest: bool,
     installed_mods_by_project: FxHashMap<Arc<str>, Vec<InstalledMod>>,
-    mods_load_state: Option<(Arc<AtomicBridgeDataLoadState>, AtomicOptionSerial)>,
+    mods_load_state: Option<(BridgeDataLoadState, AtomicOptionSerial)>,
 }
 
 impl ModrinthProjectPage {
@@ -175,8 +175,8 @@ impl Render for ModrinthProjectPage {
         if let Some((mods_state, load_serial)) = &self.mods_load_state
             && let Some(install_for) = self.install_for
         {
-            let state = mods_state.load(std::sync::atomic::Ordering::SeqCst);
-            if state.should_load() {
+            mods_state.set_observed();
+            if mods_state.should_load() {
                 self.data.backend_handle.send_with_serial(MessageToBackend::RequestLoadMods { id: install_for }, load_serial);
             }
         }

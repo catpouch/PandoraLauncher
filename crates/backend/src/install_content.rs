@@ -11,7 +11,7 @@ use sha1::{Digest, Sha1};
 use strum::IntoEnumIterator;
 use tokio::sync::Semaphore;
 
-use crate::{BackendState, instance::ContentFolder, lockfile::Lockfile, metadata::{items::{CurseforgeGetModFilesMetadataItem, MinecraftVersionManifestMetadataItem, ModrinthProjectVersionsMetadataItem, ModrinthVersionMetadataItem}, manager::MetaLoadError}};
+use crate::{BackendState, instance::{ContentFolder, Instance}, lockfile::Lockfile, metadata::{items::{CurseforgeGetModFilesMetadataItem, MinecraftVersionManifestMetadataItem, ModrinthProjectVersionsMetadataItem, ModrinthVersionMetadataItem}, manager::MetaLoadError}};
 
 #[derive(thiserror::Error, Debug)]
 pub enum ContentInstallError {
@@ -106,7 +106,7 @@ impl BackendState {
 
             if let InstallTarget::Instance(instance) = content.target {
                 let content_futures = ContentFolder::iter().map(|folder| {
-                    self.clone().load_instance_content(instance, folder)
+                    Instance::load_content(self.clone(), instance, folder)
                 });
                 let content_summaries = futures::future::join_all(content_futures).await;
                 for summaries in content_summaries {

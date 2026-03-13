@@ -5,7 +5,6 @@ use bridge::{
     install::{ContentDownload, ContentInstall, ContentInstallFile, InstallTarget}, instance::{ContentSummary, ContentType, InstanceStatus}, message::{AccountCapesResult, AccountSkinResult, BackendConfigWithPassword, LogFiles, MessageToBackend, MessageToFrontend}, meta::MetadataResult, modal_action::{ModalAction, ModalActionVisitUrl, ProgressTracker, ProgressTrackerFinishType}, serial::AtomicOptionSerial
 };
 use futures::TryFutureExt;
-use rustc_hash::FxHashSet;
 use schema::{auxiliary::AuxiliaryContentMeta, content::ContentSource, curseforge::{CurseforgeGetModFilesRequest, CurseforgeModLoaderType}, minecraft_profile::MinecraftProfileResponse, modrinth::ModrinthLoader, version::{LaunchArgument, LaunchArgumentValue}};
 use serde::{Deserialize, Serialize};
 use strum::IntoEnumIterator;
@@ -14,7 +13,7 @@ use ustr::Ustr;
 use uuid::Uuid;
 
 use crate::{
-    BackendState, CachedMinecraftProfile, LoginError, account::BackendAccount, arcfactory::ArcStrFactory, instance::ContentFolder, launch::{ArgumentExpansionKey, LaunchError}, log_reader, metadata::{items::{AssetsIndexMetadataItem, CurseforgeGetModFilesMetadataItem, CurseforgeSearchMetadataItem, FabricLoaderManifestMetadataItem, ForgeInstallerMavenMetadataItem, MinecraftVersionManifestMetadataItem, MinecraftVersionMetadataItem, ModrinthProjectMetadataItem, ModrinthProjectVersionsMetadataItem, ModrinthSearchMetadataItem, ModrinthV3VersionUpdateMetadataItem, ModrinthVersionUpdateMetadataItem, MojangJavaRuntimeComponentMetadataItem, MojangJavaRuntimesMetadataItem, NeoforgeInstallerMavenMetadataItem, VersionUpdateParameters, VersionV3LoaderFields, VersionV3UpdateParameters}, manager::MetaLoadError}, mod_metadata::{ContentUpdateAction, ContentUpdateKey}, skin_manager::SkinManager
+    BackendState, CachedMinecraftProfile, FolderChanges, LoginError, account::BackendAccount, arcfactory::ArcStrFactory, instance::{ContentFolder, Instance}, launch::{ArgumentExpansionKey, LaunchError}, log_reader, metadata::{items::{AssetsIndexMetadataItem, CurseforgeGetModFilesMetadataItem, CurseforgeSearchMetadataItem, FabricLoaderManifestMetadataItem, ForgeInstallerMavenMetadataItem, MinecraftVersionManifestMetadataItem, MinecraftVersionMetadataItem, ModrinthProjectMetadataItem, ModrinthProjectVersionsMetadataItem, ModrinthSearchMetadataItem, ModrinthV3VersionUpdateMetadataItem, ModrinthVersionUpdateMetadataItem, MojangJavaRuntimeComponentMetadataItem, MojangJavaRuntimesMetadataItem, NeoforgeInstallerMavenMetadataItem, VersionUpdateParameters, VersionV3LoaderFields, VersionV3UpdateParameters}, manager::MetaLoadError}, mod_metadata::{ContentUpdateAction, ContentUpdateKey}, skin_manager::SkinManager
 };
 
 impl BackendState {
@@ -71,16 +70,16 @@ impl BackendState {
                 });
             },
             MessageToBackend::RequestLoadWorlds { id } => {
-                tokio::task::spawn(self.clone().load_instance_worlds(id));
+                tokio::task::spawn(Instance::load_worlds(self.clone(), id));
             },
             MessageToBackend::RequestLoadServers { id } => {
-                tokio::task::spawn(self.clone().load_instance_servers(id));
+                tokio::task::spawn(Instance::load_servers(self.clone(), id));
             },
             MessageToBackend::RequestLoadMods { id } => {
-                tokio::task::spawn(self.clone().load_instance_content(id, ContentFolder::Mods));
+                tokio::task::spawn(Instance::load_content(self.clone(), id, ContentFolder::Mods));
             },
             MessageToBackend::RequestLoadResourcePacks { id } => {
-                tokio::task::spawn(self.clone().load_instance_content(id, ContentFolder::ResourcePacks));
+                tokio::task::spawn(Instance::load_content(self.clone(), id, ContentFolder::ResourcePacks));
             },
             MessageToBackend::CreateInstance { name, version, loader, icon } => {
                 self.create_instance(&name, &version, loader, icon).await;
@@ -291,10 +290,8 @@ impl BackendState {
                     return;
                 };
 
-                let mut reload = FxHashSet::default();
-
                 for mod_id in mod_ids {
-                    if let Some((instance_mod, folder)) = instance.try_get_content(mod_id) {
+                    if let Some((instance_mod, _)) = instance.try_get_content(mod_id) {
                         if instance_mod.enabled == enabled {
                             return;
                         }
@@ -307,16 +304,13 @@ impl BackendState {
                         };
 
                         let _ = std::fs::rename(&instance_mod.path, new_path);
-                        reload.insert((id, folder));
                     }
                 }
-
-                instance_state.reload_immediately.extend(reload);
             },
             MessageToBackend::SetContentChildEnabled { id, content_id: mod_id, child_id, child_name, child_filename, enabled } => {
                 let mut instance_state = self.instance_state.write();
                 if let Some(instance) = instance_state.instances.get_mut(id)
-                    && let Some((instance_mod, folder)) = instance.try_get_content(mod_id)
+                    && let Some((instance_mod, _)) = instance.try_get_content(mod_id)
                 {
                     let Some(aux_path) = crate::pandora_aux_path_for_content(instance_mod) else {
                         return;
@@ -357,7 +351,6 @@ impl BackendState {
                             log::error!("Unable to save aux meta: {err:?}");
                             self.send.send_error("Unable to save aux meta");
                         }
-                        instance_state.reload_immediately.insert((id, folder));
                     }
                 }
             },
@@ -376,10 +369,8 @@ impl BackendState {
                     return;
                 };
 
-                let mut reload = FxHashSet::default();
-
                 for mod_id in mod_ids {
-                    let Some((instance_mod, folder)) = instance.try_get_content(mod_id) else {
+                    let Some((instance_mod, _)) = instance.try_get_content(mod_id) else {
                         self.send.send_error("Unable to delete mod, invalid id");
                         return;
                     };
@@ -389,11 +380,7 @@ impl BackendState {
                     if let Some(aux_path) = crate::pandora_aux_path_for_content(&instance_mod) {
                         _ = std::fs::remove_file(aux_path);
                     }
-
-                    reload.insert((id, folder));
                 }
-
-                instance_state.reload_immediately.extend(reload);
             },
             MessageToBackend::UpdateCheck { instance: id, modal_action } => {
                 let (loader, version) = if let Some(instance) = self.instance_state.write().instances.get_mut(id) {
@@ -408,7 +395,7 @@ impl BackendState {
 
                 let mut content = Vec::new();
                 for folder in ContentFolder::iter() {
-                    let Some(summaries) = self.clone().load_instance_content(id, folder).await else {
+                    let Some(summaries) = Instance::load_content(self.clone(), id, folder).await else {
                         modal_action.set_finished();
                         return;
                     };
@@ -653,8 +640,8 @@ impl BackendState {
                         drop(meta_updates);
 
                         if let Some(instance) = self.instance_state.write().instances.get_mut(id) {
-                            for (_, state) in &mut instance.content_state {
-                                state.mark_dirty(None);
+                            for content_folder in ContentFolder::iter() {
+                                instance.mark_content_dirty(self, content_folder, FolderChanges::all_dirty(), true);
                             }
                         }
                     },
@@ -1301,7 +1288,7 @@ impl BackendState {
                 if let Some(instance) = self.instance_state.write().instances.get_mut(id) {
                     if cfg!(windows) {
                         self.file_watching.write().unwatch_subdirectories_of_instance(id);
-                        instance.mark_all_dirty();
+                        instance.mark_all_dirty(self, false);
                     }
 
                     #[cfg(windows)]

@@ -1,6 +1,6 @@
 use std::{collections::BTreeSet, ops::Range, sync::{Arc, atomic::AtomicBool}, time::Duration};
 
-use bridge::{install::{ContentDownload, ContentInstall, ContentInstallFile, InstallTarget}, instance::{ContentUpdateStatus, InstanceContentID, InstanceID}, message::{AtomicBridgeDataLoadState, MessageToBackend}, meta::MetadataRequest, modal_action::ModalAction, serial::AtomicOptionSerial};
+use bridge::{install::{ContentDownload, ContentInstall, ContentInstallFile, InstallTarget}, instance::{ContentUpdateStatus, InstanceContentID, InstanceID}, message::{BridgeDataLoadState, MessageToBackend}, meta::MetadataRequest, modal_action::ModalAction, serial::AtomicOptionSerial};
 use enumset::EnumSet;
 use gpui::{prelude::*, *};
 use gpui_component::{
@@ -37,7 +37,7 @@ pub struct CurseforgeSearchPage {
     scroll_handle: UniformListScrollHandle,
     search_error: Option<SharedString>,
     image_cache: Entity<RetainAllImageCache>,
-    mods_load_state: Option<(Arc<AtomicBridgeDataLoadState>, AtomicOptionSerial)>
+    mods_load_state: Option<(BridgeDataLoadState, AtomicOptionSerial)>
 }
 
 pub struct InstalledMod {
@@ -681,8 +681,8 @@ impl Render for CurseforgeSearchPage {
         if let Some((mods_state, load_serial)) = &self.mods_load_state
             && let Some(install_for) = self.install_for
         {
-            let state = mods_state.load(std::sync::atomic::Ordering::SeqCst);
-            if state.should_load() {
+            mods_state.set_observed();
+            if mods_state.should_load() {
                 self.data.backend_handle.send_with_serial(MessageToBackend::RequestLoadMods { id: install_for }, load_serial);
             }
         }
