@@ -789,6 +789,7 @@ impl Render for InstanceSettingsSubpage {
                     )
                     .child(v_flex()
                         .gap_1()
+                        .line_height(px(24.0))
                         .child(ts!("common.min"))
                         .child(ts!("common.max")))
                 )
