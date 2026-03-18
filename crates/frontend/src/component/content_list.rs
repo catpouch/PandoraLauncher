@@ -81,7 +81,7 @@ impl ContentListDelegate {
         let (desc1, desc2) = create_descriptions(summary.content_summary.name.clone(),
             summary.content_summary.version_str.clone(), summary.content_summary.authors.clone(),
             summary.content_summary.rich_description.clone(),
-            summary.filename.clone(), cx.theme().muted_foreground);
+            !summary.enabled, summary.filename.clone(), cx.theme().muted_foreground);
 
         let id = self.id;
         let content_id = summary.id;
@@ -362,10 +362,6 @@ impl ContentListDelegate {
             gpui::img(ImageSource::Resource(Resource::Embedded("images/default_mod.png".into())))
         };
 
-        let (desc1, desc2) = create_descriptions(summary.name.clone(),
-            summary.version_str.clone(), summary.authors.clone(), summary.rich_description.clone(),
-            child.path.clone(), cx.theme().muted_foreground);
-
         let mut hasher = DefaultHasher::new();
         child.parent_filename_hash.hash(&mut hasher);
         child.path.hash(&mut hasher);
@@ -373,6 +369,10 @@ impl ContentListDelegate {
 
         let enabled = child.enabled;
         let visually_enabled = enabled && child.parent_enabled && !child.disabled_third_party_downloads;
+
+        let (desc1, desc2) = create_descriptions(summary.name.clone(),
+            summary.version_str.clone(), summary.authors.clone(), summary.rich_description.clone(),
+            !visually_enabled, child.path.clone(), cx.theme().muted_foreground);
 
         let mut item_content = h_flex()
             .gap_1()
@@ -677,7 +677,7 @@ impl ListDelegate for ContentListDelegate {
     }
 }
 
-fn create_descriptions(name: Option<Arc<str>>, version: Arc<str>, authors: Arc<str>, rich_description: Option<Arc<FlatTextComponent>>, filename: Arc<str>, secondary: Hsla) -> (Div, Option<Div>) {
+fn create_descriptions(name: Option<Arc<str>>, version: Arc<str>, authors: Arc<str>, rich_description: Option<Arc<FlatTextComponent>>, grayscale: bool, filename: Arc<str>, secondary: Hsla) -> (Div, Option<Div>) {
     if name.is_none() && authors.is_empty() {
         if let Some(rich_description) = rich_description {
             let styled_text = StyledText::new(&rich_description.content)
@@ -685,7 +685,14 @@ fn create_descriptions(name: Option<Arc<str>>, version: Arc<str>, authors: Arc<s
                     (
                         run.range.clone(),
                         HighlightStyle {
-                            color: run.style.colour.map(|rgb| gpui::rgb(rgb).into()),
+                            color: run.style.colour.map(|rgb| {
+                                let hsla: Hsla = gpui::rgb(rgb).into();
+                                if grayscale {
+                                    hsla.grayscale()
+                                } else {
+                                    hsla
+                                }
+                            }),
                             font_weight: run.style.bold.map(|bold| {
                                 if bold {
                                     FontWeight::BOLD
