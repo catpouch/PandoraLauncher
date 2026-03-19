@@ -1382,8 +1382,8 @@ impl BackendState {
                 }
             },
             MessageToBackend::RelocateInstance { id, path } => {
-                if path.exists() {
-                    self.send.send_warning("Cannot relocate instance: path already exists");
+                if let Err(err) = std::fs::remove_dir(&path) && err.kind() != std::io::ErrorKind::NotFound {
+                    self.send.send_warning(format!("Cannot relocate instance: {err}"));
                     return;
                 }
 
