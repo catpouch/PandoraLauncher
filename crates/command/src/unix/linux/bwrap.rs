@@ -192,8 +192,6 @@ pub fn spawn(mut command: PandoraCommand, sandbox: PandoraSandbox, context: &mut
         return Err(Error::new(ErrorKind::NotFound, "unable to resolve executable"));
     };
 
-    dbg!(&resolved_executable);
-
     let Some(bwrap) = crate::path_cache::get_command_path(OsStr::new("bwrap")) else {
         return Err(Error::new(ErrorKind::NotFound, "unable to find 'bwrap'"));
     };

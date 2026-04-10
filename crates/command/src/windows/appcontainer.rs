@@ -455,38 +455,6 @@ fn acl_eq(first: *const ACL, second: *const ACL) -> std::io::Result<bool> {
     Ok(true)
 }
 
-// todo: remove
-// fn print(acl: *const ACL) -> std::io::Result<bool> {
-//     let acl = unsafe { acl.as_ref() }.unwrap();
-
-//     for i in 0..acl.AceCount {
-//         let mut ace_ptr = std::ptr::null_mut();
-//         unsafe { GetAce(acl, i as u32, &mut ace_ptr)? };
-
-//         let ace_header = unsafe { ace_ptr.cast::<ACE_HEADER>().as_ref() };
-//         let Some(ace_header) = ace_header else {
-//             return Ok(false);
-//         };
-
-//         if ace_header.AceType == 0 {
-//             let access_allowed = unsafe { ace_ptr.cast::<ACCESS_ALLOWED_ACE>().as_mut().unwrap() };
-//             let psid = PSID(&mut access_allowed.SidStart as *mut u32 as *mut c_void);
-
-//             let mut stringsid = PWSTR::default();
-//             unsafe { ConvertSidToStringSidW(psid, &mut stringsid)? };
-//             assert!(!stringsid.is_null());
-
-//             dbg!(access_allowed);
-//             dbg!(OsString::from_wide(unsafe { stringsid.as_wide() }));
-
-//         } else {
-//             eprintln!("unknown type: {:?}", ace_header.AceType);
-//         }
-//     }
-
-//     Ok(true)
-// }
-
 pub fn set_traverse_acls(args: Vec<OsString>) -> std::io::Result<()> {
     if args.is_empty() {
         return Err(Error::new(ErrorKind::InvalidInput, "missing sid"));
