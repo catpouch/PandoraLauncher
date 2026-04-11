@@ -251,7 +251,8 @@ pub enum MessageToBackend {
     Login {
         account: Uuid,
         modal_action: ModalAction,
-    }
+    },
+    Quit,
 }
 
 #[derive(Debug)]
@@ -321,6 +322,7 @@ pub enum MessageToFrontend {
         selected_account: Option<Uuid>,
     },
     Refresh,
+    Quit,
     CloseModal,
     MoveInstanceToTop {
         id: InstanceID,

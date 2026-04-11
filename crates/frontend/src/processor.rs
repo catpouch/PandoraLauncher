@@ -1,6 +1,6 @@
 use std::{collections::HashMap, sync::{Arc, atomic::AtomicBool}};
 
-use bridge::{instance::InstanceStatus, message::{BridgeNotificationType, MessageToFrontend}};
+use bridge::{instance::InstanceStatus, message::{BridgeNotificationType, MessageToFrontend}, quit::QuitCoordinator};
 use gpui::{AnyWindowHandle, App, AppContext, Entity, SharedString, TitlebarOptions, Window, WindowDecorations, WindowHandle, WindowOptions, px, size};
 use gpui_component::{notification::{Notification, NotificationType}, Root, WindowExt};
 
@@ -12,16 +12,18 @@ pub struct Processor {
     main_window_handle: Option<AnyWindowHandle>,
     main_window_hidden: Arc<AtomicBool>,
     waiting_for_window: Vec<MessageToFrontend>,
+    quit_coordinator: QuitCoordinator,
 }
 
 impl Processor {
-    pub fn new(data: DataEntities, main_window_hidden: Arc<AtomicBool>) -> Self {
+    pub fn new(data: DataEntities, main_window_hidden: Arc<AtomicBool>, quit_coordinator: QuitCoordinator) -> Self {
         Self {
             data,
             game_output_windows: HashMap::new(),
             main_window_handle: None,
             main_window_hidden,
             waiting_for_window: Vec::new(),
+            quit_coordinator,
         }
     }
 
@@ -109,6 +111,7 @@ impl Processor {
                     }
                 } else if status == InstanceStatus::NotRunning {
                     if self.main_window_handle.is_none() && self.main_window_hidden.load(std::sync::atomic::Ordering::SeqCst) {
+                        self.quit_coordinator.set_can_quit(false);
                         self.main_window_handle = Some(crate::open_main_window(&self.data, cx));
                         self.main_window_hidden.store(false, std::sync::atomic::Ordering::SeqCst);
                         self.process_messages_waiting_for_window(cx);
@@ -170,6 +173,9 @@ impl Processor {
                     window.refresh();
                 });
             },
+            MessageToFrontend::Quit => {
+                cx.quit();
+            },
             MessageToFrontend::CloseModal => {
                 let Some(handle) = self.main_window_handle else {
                     return;
@@ -179,6 +185,7 @@ impl Processor {
                 });
             },
             MessageToFrontend::CreateGameOutputWindow { id, keep_alive } => {
+                self.quit_coordinator.set_can_quit(false);
                 let options = WindowOptions {
                     app_id: Some("PandoraLauncher".into()),
                     window_min_size: Some(size(px(360.0), px(240.0))),

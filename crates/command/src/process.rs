@@ -117,6 +117,11 @@ impl PandoraProcess {
     }
 
     pub fn wait(self) -> std::io::Result<PandoraExitStatus> {
+        // Need to remember the exit status due to waitpid at-most-once semantics
+        if let Some(exit_status) = self.exit_status {
+            return Ok(exit_status);
+        }
+
         #[cfg(unix)]
         {
             let mut status = 0 as libc::c_int;

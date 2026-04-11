@@ -1,4 +1,4 @@
-use std::{borrow::Cow, io::{BufRead, Read}, sync::Arc, time::{Duration, Instant, SystemTime}};
+use std::{borrow::Cow, io::{BufRead, Read}, sync::{Arc, atomic::Ordering}, time::{Duration, Instant, SystemTime}};
 
 use auth::{credentials::AccountCredentials, models::MinecraftAccessToken, secret::PlatformSecretStorage};
 use bridge::{
@@ -358,6 +358,7 @@ impl BackendState {
                         if let Some(instance) = self.instance_state.write().instances.get_mut(id) {
                             instance.processes.push(child.process);
                             instance.update_session();
+                            self.quit_coordinator.set_can_quit(false);
                         }
                     },
                     Err(ref err) => {
@@ -1953,6 +1954,9 @@ impl BackendState {
             MessageToBackend::Login { account, modal_action } => {
                 self.login_flow(&modal_action, Some(account)).await;
                 modal_action.set_finished();
+            },
+            MessageToBackend::Quit => {
+                self.should_quit.store(true, Ordering::Relaxed);
             },
         }
     }

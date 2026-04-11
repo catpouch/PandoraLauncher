@@ -4,8 +4,8 @@ use std::{
     path::{Path, PathBuf}, sync::{Arc, atomic::AtomicBool}
 };
 
-use bridge::
-    handle::{BackendHandle, FrontendReceiver}
+use bridge::{
+    handle::{BackendHandle, FrontendReceiver}, quit::QuitCoordinator}
 ;
 use gpui::*;
 use gpui_component::{
@@ -96,6 +96,7 @@ pub fn start(
     deadlock_message: Arc<RwLock<Option<String>>>,
     backend_handle: BackendHandle,
     mut recv: FrontendReceiver,
+    quit_coordinator: QuitCoordinator,
 ) {
     let user_agent = if let Some(version) = option_env!("PANDORA_RELEASE_VERSION") {
         format!("PandoraLauncher/{version} (https://github.com/Moulberry/PandoraLauncher)")
@@ -136,6 +137,8 @@ pub fn start(
         theme.font_family = SharedString::new_static(MAIN_FONT);
         theme.scrollbar_show = gpui_component::scroll::ScrollbarShow::Always;
 
+        cx.set_quit_mode(QuitMode::Explicit);
+
         cx.on_app_quit(|cx| {
             InterfaceConfig::force_save(cx);
             async {}
@@ -145,6 +148,7 @@ pub fn start(
 
         cx.on_window_closed({
             let main_window_hidden = main_window_hidden.clone();
+            let quit_coordinator = quit_coordinator.clone();
             move |cx| {
                 if main_window_hidden.load(std::sync::atomic::Ordering::SeqCst) {
                     return;
@@ -161,10 +165,14 @@ pub fn start(
                         }
                     }
 
-                    cx.quit();
-                } else if cx.windows().is_empty() {
-                    cx.quit();
+                    for window in cx.windows() {
+                        _ = window.update(cx, |_, window, _| {
+                            window.remove_window();
+                        });
+                    }
                 }
+
+                quit_coordinator.set_can_quit(cx.windows().is_empty());
             }
         }).detach();
 
@@ -177,7 +185,11 @@ pub fn start(
         ]);
 
         cx.on_action(|_: &Quit, cx| {
-            cx.quit();
+            for window in cx.windows() {
+                _ = window.update(cx, |_, window, _| {
+                    window.remove_window();
+                });
+            }
         });
 
         let instances = cx.new(|_| InstanceEntries {
@@ -197,7 +209,7 @@ pub fn start(
             })
         };
 
-        let mut processor = Processor::new(data.clone(), main_window_hidden);
+        let mut processor = Processor::new(data.clone(), main_window_hidden, quit_coordinator);
 
         while let Some(message) = recv.try_recv() {
             processor.process(message, cx);
@@ -235,7 +247,6 @@ pub fn start(
                 });
             }
         }
-
 
         cx.spawn(async move |cx| {
             while let Some(message) = recv.recv().await {

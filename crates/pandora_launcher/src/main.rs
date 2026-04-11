@@ -7,8 +7,9 @@ use std::sync::Arc;
 use std::fmt::Write;
 use std::time::SystemTime;
 
-use bridge::message::MessageToFrontend;
+use bridge::message::MessageToBackend;
 use bridge::modal_action::ModalAction;
+use bridge::quit::QuitCoordinator;
 use clap::Parser;
 use fern::colors::ColoredLevelConfig;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
@@ -68,30 +69,31 @@ fn main() {
     panic::install_logging_hook();
 
     if let Some(run_instance) = cli.run_instance {
-        let (backend_recv, backend_handle, mut frontend_recv, frontend_handle) = bridge::handle::create_pair();
+        todo!()
+        // let (backend_recv, backend_handle, mut frontend_recv, frontend_handle) = bridge::handle::create_pair();
 
-        backend::start(launcher_dir.clone(), frontend_handle, backend_handle.clone(), backend_recv);
+        // backend::start(launcher_dir.clone(), frontend_handle, backend_handle.clone(), backend_recv);
 
-        while let Some(message) = frontend_recv.try_recv() {
-            if let MessageToFrontend::InstanceAdded { id, name, .. } = message {
-                if name.as_str() == run_instance.as_str() {
-                    println!("Starting instance {}", run_instance);
-                    let modal_action = ModalAction::default();
-                    backend_handle.send(bridge::message::MessageToBackend::StartInstance {
-                        id,
-                        quick_play: None,
-                        modal_action: modal_action.clone()
-                    });
-                    run_modal_action(modal_action);
-                    // todo: remove this sleep after daemonizing
-                    std::thread::sleep(std::time::Duration::from_millis(100));
-                    return;
-                }
-            }
-        }
+        // while let Some(message) = frontend_recv.try_recv() {
+        //     if let MessageToFrontend::InstanceAdded { id, name, .. } = message {
+        //         if name.as_str() == run_instance.as_str() {
+        //             println!("Starting instance {}", run_instance);
+        //             let modal_action = ModalAction::default();
+        //             backend_handle.send(bridge::message::MessageToBackend::StartInstance {
+        //                 id,
+        //                 quick_play: None,
+        //                 modal_action: modal_action.clone()
+        //             });
+        //             run_modal_action(modal_action);
+        //             // todo: remove this sleep after daemonizing
+        //             std::thread::sleep(std::time::Duration::from_millis(100));
+        //             return;
+        //         }
+        //     }
+        // }
 
-        show_error(format!("Unable to find instance {}", run_instance));
-        std::process::exit(1);
+        // show_error(format!("Unable to find instance {}", run_instance));
+        // std::process::exit(1);
     } else {
         run_gui(launcher_dir);
     }
@@ -216,8 +218,17 @@ fn run_gui(launcher_dir: PathBuf) {
         }
     });
 
-    backend::start(launcher_dir.clone(), frontend_handle, backend_handle.clone(), backend_recv);
-    frontend::start(launcher_dir.clone(), panic_message, deadlock_message, backend_handle, frontend_recv);
+    let quit_handler = {
+        let backend_handle = backend_handle.clone();
+        QuitCoordinator::new(Box::new(move || {
+            backend_handle.send(MessageToBackend::Quit);
+            // backend will send Quit to frontend when done
+        }))
+    };
+
+    backend::start(launcher_dir.clone(), frontend_handle, backend_handle.clone(), backend_recv, quit_handler.fork());
+    frontend::start(launcher_dir.clone(), panic_message, deadlock_message, backend_handle, frontend_recv, quit_handler);
+    log::info!("Quiting...");
 }
 
 fn setup_logging(level: log::LevelFilter) -> Result<(), fern::InitError> {
