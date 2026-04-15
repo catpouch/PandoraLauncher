@@ -1219,6 +1219,7 @@ dependencies = [
  "once_cell",
  "parking_lot",
  "rustc-hash 2.1.1",
+ "scopeguard",
  "security-framework",
  "security-framework-sys",
  "tokio",
