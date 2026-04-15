@@ -5388,6 +5388,7 @@ dependencies = [
  "backtrace",
  "bridge",
  "clap",
+ "command",
  "directories",
  "fern",
  "frontend",

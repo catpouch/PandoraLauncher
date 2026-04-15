@@ -276,7 +276,7 @@ impl PlatformListener {
 #[cfg(windows)]
 impl PlatformListener {
     fn bind(global_name: &std::ffi::OsStr) -> std::io::Result<Self> {
-        let pipe_name = std::ffi::OsString::new();
+        let mut pipe_name = std::ffi::OsString::new();
         pipe_name.push(r"\\.\pipe\");
         pipe_name.push(global_name);
 
@@ -335,7 +335,7 @@ impl PlatformClientStream {
 #[cfg(windows)]
 impl PlatformClientStream {
     async fn connect(global_name: &std::ffi::OsStr) -> std::io::Result<Self> {
-        let pipe_name = std::ffi::OsString::new();
+        let mut pipe_name = std::ffi::OsString::new();
         pipe_name.push(r"\\.\pipe\");
         pipe_name.push(global_name);
 
