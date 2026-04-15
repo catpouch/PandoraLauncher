@@ -51,6 +51,7 @@ fn main() {
     };
 
     let launcher_dir = data_dir.join("PandoraLauncher");
+    _ = std::fs::create_dir_all(&launcher_dir);
     _ = std::env::set_current_dir(&launcher_dir);
 
     let socket = launcher_dir.join("launcher.sock");
