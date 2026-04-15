@@ -48,4 +48,4 @@ jobs:
         uses: rui314/setup-mold@v1
 
       - name: Run build command
-        run: cargo build --release --target ${{ matrix.platform.target }}
+        run: cargo build --release --frozen --target ${{ matrix.platform.target }}
