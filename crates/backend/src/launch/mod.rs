@@ -222,6 +222,7 @@ impl Launcher {
             java_path,
             natives_dir,
             libraries_dir: self.directories.libraries_dir.clone(),
+            synced_dir: self.directories.synced_dir.clone(),
             game_dir: dot_minecraft_path,
             log_configs_dir: self.directories.log_configs_dir.clone(),
             sandbox_dir: self.directories.sandbox_dir.clone(),
@@ -2094,6 +2095,7 @@ pub struct LaunchContext {
     pub java_path: PathBuf,
     pub natives_dir: PathBuf,
     pub libraries_dir: Arc<Path>,
+    pub synced_dir: Arc<Path>,
     pub game_dir: Arc<Path>,
     pub log_configs_dir: Arc<Path>,
     pub sandbox_dir: Arc<Path>,
@@ -2259,6 +2261,7 @@ impl LaunchContext {
                 allow_write: vec![
                     self.game_dir.clone(),
                     self.natives_dir.clone().into(),
+                    self.synced_dir.clone(),
                 ],
                 is_jvm: true,
                 grant_network_access: true,
