@@ -1,8 +1,8 @@
-use std::{ffi::c_void, io::{Error, ErrorKind}, os::windows::{ffi::OsStrExt, io::{AsRawHandle, FromRawHandle}}};
+use std::{ffi::c_void, io::{Error, ErrorKind}, os::windows::{ffi::OsStrExt, io::{AsRawHandle, OwnedHandle}}};
 
-use windows::{Win32::{Foundation::HANDLE, System::{Console::{GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE}, JobObjects::AssignProcessToJobObject, Threading::{CREATE_UNICODE_ENVIRONMENT, CreateProcessW, EXTENDED_STARTUPINFO_PRESENT, LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION, STARTF_FORCEONFEEDBACK, STARTF_USESTDHANDLES, STARTUPINFOEXW, STARTUPINFOW}}}, core::Free};
+use windows::{Win32::{Foundation::{HANDLE, HANDLE_FLAG_INHERIT, SetHandleInformation}, System::{Console::{GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE}, JobObjects::AssignProcessToJobObject, Threading::{CREATE_UNICODE_ENVIRONMENT, CreateProcessW, EXTENDED_STARTUPINFO_PRESENT, LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION, STARTF_FORCEONFEEDBACK, STARTF_USESTDHANDLES, STARTUPINFOEXW, STARTUPINFOW}}}, core::Free};
 
-use crate::{PandoraArg, PandoraChild, PandoraCommand, PandoraStdioReadMode, PandoraStdioWriteMode, process::PandoraProcess, spawner::SpawnContext, windows::windows_helpers};
+use crate::{PandoraChild, PandoraCommand, PandoraStdioReadMode, PandoraStdioWriteMode, process::PandoraProcess, spawner::SpawnContext, windows::windows_helpers};
 
 pub fn spawn(command: PandoraCommand, context: &mut SpawnContext) -> std::io::Result<PandoraChild> {
     spawn_with_attributes(command, context, None)
@@ -13,6 +13,7 @@ pub(crate) fn spawn_with_attributes(mut command: PandoraCommand, context: &mut S
         context.job_handle = Some(windows_helpers::to_owned_handle(windows_helpers::create_job_object()?)?);
     }
 
+    let env_map = command.take_final_env();
     let application_path = command.resolve_executable_path()?;
     let application_name = application_path.as_os_str().encode_wide()
         .chain([0])
@@ -24,31 +25,11 @@ pub(crate) fn spawn_with_attributes(mut command: PandoraCommand, context: &mut S
         .chain([0])
         .collect::<Vec<_>>());
 
-    if let Some(inherit_env) = command.inherit_env {
-        for (k, v) in std::env::vars_os() {
-            let k: PandoraArg = k.into();
-            if command.env.contains_key(&k) {
-                continue;
-            }
-            if !(inherit_env)(&k.0) {
-                continue;
-            }
-            command.env.insert(k, v.into());
-        }
-    } else {
-        for (k, v) in std::env::vars_os() {
-            let k: PandoraArg = k.into();
-            if command.env.contains_key(&k) {
-                continue;
-            }
-            command.env.insert(k, v.into());
-        }
-    }
     let mut env = Vec::new();
-    if command.env.is_empty() {
+    if env_map.is_empty() {
         env.push(0);
     }
-    for (k, v) in command.env {
+    for (k, v) in env_map {
         if k.0.as_encoded_bytes().contains(&b'\0') || v.0.as_encoded_bytes().contains(&b'\0') {
             return Err(Error::new(ErrorKind::InvalidData, "environment variable contained null byte"));
         }
@@ -85,18 +66,24 @@ pub(crate) fn spawn_with_attributes(mut command: PandoraCommand, context: &mut S
             }
         },
         PandoraStdioWriteMode::Pipe => {
-            let (read, write) = windows_helpers::create_inheritable_pipe()?;
-            handles_to_close.push(windows_helpers::to_owned_handle(read)?);
-            stdin_write = Some(unsafe { std::io::PipeWriter::from_raw_handle(write.0) });
-            stdin_read = Some(read);
+            let (read, write) = std::io::pipe()?;
+            let owned: OwnedHandle = read.into();
+
+            stdin_write = Some(write);
+            unsafe { SetHandleInformation(HANDLE(owned.as_raw_handle()), HANDLE_FLAG_INHERIT.0, HANDLE_FLAG_INHERIT)? };
+            stdin_read = Some(HANDLE(owned.as_raw_handle()));
+            handles_to_close.push(owned);
         }
     }
     match command.stdout {
         PandoraStdioReadMode::Pipe => {
-            let (read, write) = windows_helpers::create_inheritable_pipe()?;
-            handles_to_close.push(windows_helpers::to_owned_handle(write)?);
-            stdout_write = Some(write);
-            stdout_read = Some(unsafe { std::io::PipeReader::from_raw_handle(read.0) });
+            let (read, write) = std::io::pipe()?;
+            let owned: OwnedHandle = write.into();
+
+            stdout_read = Some(read);
+            unsafe { SetHandleInformation(HANDLE(owned.as_raw_handle()), HANDLE_FLAG_INHERIT.0, HANDLE_FLAG_INHERIT)? };
+            stdout_write = Some(HANDLE(owned.as_raw_handle()));
+            handles_to_close.push(owned);
         },
         PandoraStdioReadMode::Null => {
             if context.null_device.is_none() {
@@ -115,10 +102,13 @@ pub(crate) fn spawn_with_attributes(mut command: PandoraCommand, context: &mut S
     }
     match command.stderr {
         PandoraStdioReadMode::Pipe => {
-            let (read, write) = windows_helpers::create_inheritable_pipe()?;
-            handles_to_close.push(windows_helpers::to_owned_handle(write)?);
-            stderr_write = Some(write);
-            stderr_read = Some(unsafe { std::io::PipeReader::from_raw_handle(read.0) });
+            let (read, write) = std::io::pipe()?;
+            let owned: OwnedHandle = write.into();
+
+            stderr_read = Some(read);
+            unsafe { SetHandleInformation(HANDLE(owned.as_raw_handle()), HANDLE_FLAG_INHERIT.0, HANDLE_FLAG_INHERIT)? };
+            stderr_write = Some(HANDLE(owned.as_raw_handle()));
+            handles_to_close.push(owned);
         },
         PandoraStdioReadMode::Null => {
             if context.null_device.is_none() {

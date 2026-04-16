@@ -2,7 +2,7 @@ use std::{ffi::OsString, io::{Error, ErrorKind}, os::windows::io::{HandleOrInval
 
 use crate::PandoraArg;
 
-use windows::Win32::{Foundation::{DUPLICATE_SAME_ACCESS, DuplicateHandle, GENERIC_READ, GENERIC_WRITE, HANDLE, TRUE}, Security::SECURITY_ATTRIBUTES, Storage::FileSystem::{CreateFileW, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING}, System::{JobObjects::{CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation, SetInformationJobObject}, Pipes::CreatePipe, Threading::GetCurrentProcess}};
+use windows::Win32::{Foundation::{DUPLICATE_SAME_ACCESS, DuplicateHandle, GENERIC_READ, GENERIC_WRITE, HANDLE, TRUE}, Security::SECURITY_ATTRIBUTES, Storage::FileSystem::{CreateFileW, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING}, System::{JobObjects::{CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation, SetInformationJobObject}, Threading::GetCurrentProcess}};
 
 pub fn join_windows_shell_arg(args: &[PandoraArg]) -> OsString {
     let mut string = Vec::new();
@@ -89,32 +89,6 @@ pub fn create_job_object() -> std::io::Result<HANDLE> {
         )?
     }
     Ok(job_handle)
-}
-
-pub fn create_inheritable_pipe() -> std::io::Result<(HANDLE, HANDLE)> {
-    let mut read = HANDLE::default();
-    let mut write = HANDLE::default();
-
-    let sa = SECURITY_ATTRIBUTES {
-        nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
-        lpSecurityDescriptor: std::ptr::null_mut(),
-        bInheritHandle: TRUE,
-    };
-
-    unsafe {
-        CreatePipe(
-            &mut read,
-            &mut write,
-            Some(&sa),
-            0
-        )?;
-    }
-
-    if read.is_invalid() || write.is_invalid() {
-        return Err(Error::new(ErrorKind::Other, "CreatePipe returned invalid handles"));
-    }
-
-    Ok((read, write))
 }
 
 pub fn open_null_device() -> std::io::Result<OwnedHandle> {
