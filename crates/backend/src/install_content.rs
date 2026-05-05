@@ -176,57 +176,6 @@ impl BackendState {
             }
         }
 
-        let mut instance_dir = None;
-
-        let mut loader_hint = content.loader_hint;
-        let mut version_hint = content.version_hint;
-
-        match content.target {
-            bridge::install::InstallTarget::Instance(instance_id) => {
-                if let Some(instance) = self.instance_state.write().instances.get_mut(instance_id) {
-                    if instance.configuration.get().loader == Loader::Vanilla {
-                        if loader_hint == Loader::Unknown {
-                            loader_hint = determine_loader_from_content(&files).unwrap_or(Loader::Unknown);
-                        }
-                        if loader_hint != Loader::Unknown {
-                            instance.configuration.modify(|config| {
-                                config.loader = content.loader_hint;
-                            });
-                        }
-                    }
-
-                    instance_dir = Some(instance.dot_minecraft_path.clone());
-                }
-            },
-            bridge::install::InstallTarget::Library => {},
-            bridge::install::InstallTarget::NewInstance { name } => {
-                if version_hint.is_none() {
-                    version_hint = determine_minecraft_version_from_content(&files);
-                }
-                if version_hint.is_none() {
-                    if let Ok(meta) = self.meta.fetch(&MinecraftVersionManifestMetadataItem).await {
-                        version_hint = Some(meta.latest.release.into());
-                    }
-                }
-
-                if let Some(version_hint) = version_hint {
-                    if loader_hint == Loader::Unknown {
-                        loader_hint = determine_loader_from_content(&files).unwrap_or(Loader::Unknown);
-                    }
-
-                    let mut name = name;
-                    if name.is_none() {
-                        name = determine_name_from_content(&files);
-                    }
-                    let name = name.as_deref().unwrap_or("New Instance");
-
-                    // todo: use icon of mod/modpack/etc. for icon of instance
-                    instance_dir = self.create_instance_sanitized(&name, &version_hint, loader_hint, None).await
-                        .map(|v| v.join(".minecraft").into());
-                }
-            },
-        }
-
         let sources = files.iter()
             .filter_map(|install| {
                 if install.content_file.content_source != ContentSource::Manual {
@@ -237,9 +186,75 @@ impl BackendState {
             });
         self.mod_metadata_manager.set_content_sources(sources);
 
-        if let Some(instance_dir) = instance_dir {
+        let mut dot_minecraft_dir = None;
+        let mut instance_running = false;
+
+        let mut loader_hint = content.loader_hint;
+        let mut version_hint = content.version_hint;
+
+        if let bridge::install::InstallTarget::NewInstance { name } = &content.target {
+            if version_hint.is_none() {
+                version_hint = determine_minecraft_version_from_content(&files);
+            }
+            if version_hint.is_none() {
+                if let Ok(meta) = self.meta.fetch(&MinecraftVersionManifestMetadataItem).await {
+                    version_hint = Some(meta.latest.release.into());
+                }
+            }
+
+            if let Some(version_hint) = version_hint {
+                if loader_hint == Loader::Unknown {
+                    loader_hint = determine_loader_from_content(&files).unwrap_or(Loader::Unknown);
+                }
+
+                let mut name = name.clone();
+                if name.is_none() {
+                    name = determine_name_from_content(&files);
+                }
+                let name = name.as_deref().unwrap_or("New Instance");
+
+                // todo: use icon of mod/modpack/etc. for icon of instance
+                dot_minecraft_dir = self.create_instance_sanitized(&name, &version_hint, loader_hint, None).await
+                    .map(|v| v.join(".minecraft").into());
+            }
+        }
+
+        let mut instance_lock_guard = None;
+
+        if let bridge::install::InstallTarget::Instance(instance_id) = content.target {
+            let mut instance_state = self.instance_state.write();
+            if let Some(instance) = instance_state.instances.get_mut(instance_id) {
+                instance_running = !instance.processes.is_empty();
+
+                if instance.configuration.get().loader == Loader::Vanilla {
+                    if loader_hint == Loader::Unknown {
+                        loader_hint = determine_loader_from_content(&files).unwrap_or(Loader::Unknown);
+                    }
+                    if loader_hint != Loader::Unknown {
+                        instance.configuration.modify(|config| {
+                            config.loader = content.loader_hint;
+                        });
+                    }
+                }
+
+                dot_minecraft_dir = Some(instance.dot_minecraft_path.clone());
+            }
+            instance_lock_guard = Some(instance_state);
+        } else if dot_minecraft_dir.is_some() {
+            instance_lock_guard = Some(self.instance_state.write());
+        }
+
+        if let Some(dot_minecraft_dir) = dot_minecraft_dir {
+            let mods_dir = dot_minecraft_dir.join("mods");
+            let mut cannot_modify_while_running = false;
+
             for install in files {
-                let target_path = instance_dir.join(&install.install_path);
+                let target_path = dot_minecraft_dir.join(&install.install_path);
+
+                if instance_running && target_path.starts_with(&mods_dir) {
+                    cannot_modify_while_running = true;
+                    continue;
+                }
 
                 let _ = std::fs::create_dir_all(target_path.parent().unwrap());
 
@@ -260,7 +275,13 @@ impl BackendState {
                     },
                 }
             }
+
+            if cannot_modify_while_running {
+                self.send.send_warning("Cannot modify mods folder while instance is running");
+            }
         }
+
+        drop(instance_lock_guard);
     }
 
     async fn install_into_content_library(

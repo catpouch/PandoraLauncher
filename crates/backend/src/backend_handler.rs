@@ -285,6 +285,7 @@ impl BackendState {
 
                 instance.update_session();
                 self.send.send(instance.create_modify_message());
+                self.restore_mods_folder_if_stopped(instance);
             },
             MessageToBackend::StartInstanceByName { name, quick_play } => {
                 let mut id = None;
@@ -315,10 +316,17 @@ impl BackendState {
                     return;
                 };
 
+                let mut cannot_modify_while_running = false;
+
                 for mod_id in mod_ids {
-                    if let Some((instance_mod, _)) = instance.try_get_content(mod_id) {
+                    if let Some((instance_mod, folder)) = instance.try_get_content(mod_id) {
                         if instance_mod.enabled == enabled {
-                            return;
+                            continue;
+                        }
+
+                        if folder == ContentFolder::Mods && !instance.processes.is_empty() {
+                            cannot_modify_while_running = true;
+                            continue;
                         }
 
                         let mut new_path = instance_mod.path.to_path_buf();
@@ -331,15 +339,24 @@ impl BackendState {
                         let _ = std::fs::rename(&instance_mod.path, new_path);
                     }
                 }
+
+                if cannot_modify_while_running {
+                    self.send.send_warning("Cannot modify mods folder while instance is running");
+                }
             },
             MessageToBackend::SetContentChildEnabled { id, content_id: mod_id, child_id, child_name, child_filename, enabled } => {
                 let mut instance_state = self.instance_state.write();
                 if let Some(instance) = instance_state.instances.get_mut(id)
-                    && let Some((instance_mod, _)) = instance.try_get_content(mod_id)
+                    && let Some((instance_mod, folder)) = instance.try_get_content(mod_id)
                 {
                     let Some(aux_path) = crate::pandora_aux_path_for_content(instance_mod) else {
                         return;
                     };
+
+                    if folder == ContentFolder::Mods && !instance.processes.is_empty() {
+                        self.send.send_warning("Cannot modify mods folder while instance is running");
+                        return;
+                    }
 
                     let mut aux: AuxiliaryContentMeta = crate::read_json(&aux_path).unwrap_or_default();
 
@@ -499,6 +516,7 @@ impl BackendState {
             },
             MessageToBackend::InstallContent { content, modal_action } => {
                 let this = self.clone();
+
                 tokio::spawn(async move {
                     this.install_content(content, modal_action.clone()).await;
                     modal_action.set_finished();
@@ -512,17 +530,28 @@ impl BackendState {
                     return;
                 };
 
+                let mut cannot_modify_while_running = false;
+
                 for mod_id in mod_ids {
-                    let Some((instance_mod, _)) = instance.try_get_content(mod_id) else {
+                    let Some((instance_mod, folder)) = instance.try_get_content(mod_id) else {
                         self.send.send_error("Unable to delete mod, invalid id");
-                        return;
+                        continue;
                     };
+
+                    if folder == ContentFolder::Mods && !instance.processes.is_empty() {
+                        cannot_modify_while_running = true;
+                        continue;
+                    }
 
                     _ = std::fs::remove_file(&instance_mod.path);
 
                     if let Some(aux_path) = crate::pandora_aux_path_for_content(&instance_mod) {
                         _ = std::fs::remove_file(aux_path);
                     }
+                }
+
+                if cannot_modify_while_running {
+                    self.send.send_warning("Cannot modify mods folder while instance is running");
                 }
             },
             MessageToBackend::UpdateCheck { instance: id, modal_action } => {
@@ -1939,6 +1968,7 @@ impl BackendState {
                 if let Some(launch_keepalive) = &instance.launch_keepalive && !launch_keepalive.is_alive() {
                     instance.launch_keepalive = None;
                 }
+                self.restore_mods_folder_if_stopped(instance);
                 self.send.send(instance.create_modify_message());
             }
         }
@@ -1948,8 +1978,8 @@ impl BackendState {
             return;
         };
 
-        let add_mods = tokio::select! {
-            add_mods = self.prelaunch(id, &modal_action) => add_mods,
+        let prelaunch_result = tokio::select! {
+            result = self.prelaunch(id, &modal_action) => result,
             _ = modal_action.request_cancel.cancelled() => {
                 self.send.send(MessageToFrontend::CloseModal);
                 return;
@@ -1960,12 +1990,18 @@ impl BackendState {
             self.send.send(MessageToFrontend::Refresh);
             return;
         }
+        if let Err(err) = prelaunch_result {
+            modal_action.set_error_message(format!("Unable to run prelaunch: {}", err).into());
+            log::error!("Unable to run prelaunch: {err:?}");
+            self.send.send(MessageToFrontend::Refresh);
+            return;
+        }
 
         let game_output = !self.config.write().get().dont_open_game_output_when_launching;
 
         let launch_tracker = ProgressTracker::new(Arc::from("Launching"), self.send.clone());
         modal_action.trackers.push(launch_tracker.clone());
-        let result = self.launcher.launch(&self.redirecting_http_client, dot_minecraft, configuration, quick_play, login_info, add_mods, game_output, &launch_tracker, &modal_action).await;
+        let result = self.launcher.launch(&self.redirecting_http_client, dot_minecraft, configuration, quick_play, login_info, game_output, &launch_tracker, &modal_action).await;
 
         if matches!(result, Err(LaunchError::CancelledByUser)) {
             self.send.send(MessageToFrontend::CloseModal);

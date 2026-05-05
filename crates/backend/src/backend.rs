@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap, path::{Path, PathBuf}, sync::{Arc, atomic::{AtomicBool, Ordering}}, time::{Duration, Instant, SystemTime}
+    collections::HashMap, ffi::OsStr, path::{Path, PathBuf}, sync::{Arc, atomic::{AtomicBool, Ordering}}, time::{Duration, Instant, SystemTime}
 };
 
 use auth::{
@@ -10,7 +10,7 @@ use auth::{
     serve_redirect::{self, ProcessAuthorizationError},
 };
 use bridge::{
-    handle::{BackendHandle, BackendReceiver, FrontendHandle}, install::{ContentDownload, ContentInstall, ContentInstallFile, ContentInstallPath}, instance::{ContentType, InstanceID}, message::{EmbeddedOrRaw, MessageToFrontend}, modal_action::{ModalAction, ModalActionVisitUrl, ProgressTracker, ProgressTrackerFinishType}, quit::QuitCoordinator, safe_path::SafePath
+    handle::{BackendHandle, BackendReceiver, FrontendHandle}, install::{ContentDownload, ContentInstall, ContentInstallFile, ContentInstallPath}, instance::{ContentType, InstanceContentSummary, InstanceID}, message::{EmbeddedOrRaw, MessageToFrontend}, modal_action::{ModalAction, ModalActionVisitUrl, ProgressTracker, ProgressTrackerFinishType}, quit::QuitCoordinator, safe_path::SafePath
 };
 use image::ImageFormat;
 use indexmap::IndexSet;
@@ -21,6 +21,7 @@ use schema::{auxiliary::AuxiliaryContentMeta, backend_config::{BackendConfig, Pr
 use sha1::{Digest, Sha1};
 use strum::IntoEnumIterator;
 use tokio::sync::{OnceCell, Semaphore, mpsc::Receiver};
+use ustr::Ustr;
 use uuid::Uuid;
 
 use crate::{
@@ -366,6 +367,8 @@ impl BackendState {
                 instance
             });
 
+            self.restore_mods_folder_if_stopped(instance);
+
             if show_success {
                 self.send.send_success(format!("Instance '{}' created", instance.name));
             }
@@ -498,6 +501,7 @@ impl BackendState {
                 });
             }
 
+            self.restore_mods_folder_if_stopped(instance);
             any_process_alive |= !instance.processes.is_empty() || !instance.closing_processes.is_empty();
         }
 
@@ -694,9 +698,9 @@ impl BackendState {
         }
     }
 
-    pub async fn prelaunch(self: &Arc<Self>, id: InstanceID, modal_action: &ModalAction) -> Vec<PathBuf> {
+    pub async fn prelaunch(self: &Arc<Self>, id: InstanceID, modal_action: &ModalAction) -> std::io::Result<()> {
         self.apply_syncing_to_instance(id);
-        self.prelaunch_apply_modpacks(id, modal_action).await
+        self.prelaunch_setup_mods(id, modal_action).await
     }
 
     pub fn apply_syncing_to_instance(&self, id: InstanceID) {
@@ -713,22 +717,114 @@ impl BackendState {
         }
     }
 
-    pub async fn prelaunch_apply_modpacks(self: &Arc<Self>, id: InstanceID, modal_action: &ModalAction) -> Vec<PathBuf> {
-        let (loader, minecraft_version, mod_dir) = if let Some(instance) = self.instance_state.write().instances.get_mut(id) {
-            let configuration = instance.configuration.get();
-            (configuration.loader, configuration.minecraft_version, instance.content_state[ContentFolder::Mods].path.clone())
-        } else {
-            return Vec::new();
-        };
-
-        if loader == Loader::Vanilla {
-            return Vec::new();
+    pub fn restore_mods_folder_if_stopped(&self, instance: &mut Instance) {
+        if !instance.processes.is_empty() {
+            return;
+        }
+        if let Some(keepalive) = &instance.launch_keepalive && keepalive.is_alive() {
+            return;
         }
 
-        let Some(mods) = Instance::load_content(self.clone(), id, ContentFolder::Mods).await else {
-            return Vec::new();
+        let original_mods_dir = instance.root_path.join("original_mods");
+        if !original_mods_dir.exists() {
+            instance.set_frozen_mods_folder(false);
+            return;
+        }
+
+        let mod_dir = instance.content_state[ContentFolder::Mods].path.clone();
+
+        // Copy sinytra connector cache
+        if !instance.configuration.get().sandbox {
+            let connector = mod_dir.join(".connector");
+            if connector.exists() {
+                let original_connector = original_mods_dir.join(".connector");
+                _ = std::fs::create_dir_all(&original_connector);
+                _ = crate::copy_content_recursive(&connector, &original_connector, false, &|_, _| {});
+            }
+        }
+
+        _ = std::fs::remove_dir_all(&mod_dir);
+        if let Err(err) = std::fs::rename(&original_mods_dir, &mod_dir) {
+            self.send.send_error(format!("Unable to restore mods directory: {}", err));
+            log::error!("Unable to restore mods directory: {err:?}");
+        }
+
+        instance.set_frozen_mods_folder(false);
+    }
+
+    pub async fn prelaunch_setup_mods(self: &Arc<Self>, id: InstanceID, modal_action: &ModalAction) -> std::io::Result<()> {
+        let (loader, minecraft_version, root_dir, dot_minecraft_dir, mods_dir) = if let Some(instance) = self.instance_state.write().instances.get_mut(id) {
+            if !instance.processes.is_empty() {
+                return Ok(());
+            }
+
+            let configuration = instance.configuration.get();
+            (configuration.loader, configuration.minecraft_version, instance.root_path.clone(), instance.dot_minecraft_path.clone(), instance.content_state[ContentFolder::Mods].path.clone())
+        } else {
+            return Ok(());
         };
 
+        let Some(mods) = Instance::load_content(self.clone(), id, ContentFolder::Mods).await else {
+            return Ok(());
+        };
+
+        let mut mod_copies = Vec::new();
+
+        // Remove .pandora.filename mods (todo: get rid of this)
+        if let Ok(read_dir) = std::fs::read_dir(&mods_dir) {
+            for entry in read_dir {
+                let Ok(entry) = entry else {
+                    continue;
+                };
+                let path = entry.path();
+                let Some(file_name) = path.file_name() else {
+                    continue;
+                };
+
+                let file_name = file_name.as_encoded_bytes();
+                if file_name.starts_with(b".pandora.") {
+                    log::trace!("Removing temporary mod file {:?}", &file_name);
+                    _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
+
+        self.prelaunch_collect_mods_and_apply_modpack(loader, minecraft_version, &mods, &dot_minecraft_dir, &mods_dir, &mut mod_copies, modal_action).await;
+
+        let sandbox = if let Some(instance) = self.instance_state.write().instances.get_mut(id) {
+            instance.set_frozen_mods_folder(true);
+            instance.configuration.get().sandbox
+        } else {
+            true
+        };
+
+        let original_mods_dir = root_dir.join("original_mods");
+        std::fs::rename(&mods_dir, &original_mods_dir)?;
+        if let Err(err) = self.prelaunch_create_mods_dir(mod_copies, &mods_dir, modal_action) {
+            _ = std::fs::remove_dir_all(&mods_dir);
+            _ = std::fs::rename(&original_mods_dir, &mods_dir);
+
+            if let Some(instance) = self.instance_state.write().instances.get_mut(id) {
+                instance.set_frozen_mods_folder(true);
+            }
+
+            return Err(err);
+        }
+
+        // Copy sinytra connector cache
+        if !sandbox {
+            let original_connector = original_mods_dir.join(".connector");
+            if original_connector.exists() {
+                let connector = mods_dir.join(".connector");
+                _ = std::fs::create_dir_all(&connector);
+                _ = crate::copy_content_recursive(&original_connector, &connector, false, &|_, _| {});
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn prelaunch_collect_mods_and_apply_modpack(self: &Arc<Self>, loader: Loader, minecraft_version: Ustr, mods: &[InstanceContentSummary], dot_minecraft_dir: &Path, mod_dir: &Path, mod_copies: &mut Vec<PrelaunchModCopy>, modal_action: &ModalAction) {
         struct HashedDownload {
             sha1: Arc<str>,
             path: Arc<str>,
@@ -741,177 +837,180 @@ impl BackendState {
             overrides: Arc<[(SafePath, Arc<[u8]>)]>,
         }
 
-        let loader_supports_add_mods = loader == Loader::Fabric;
-
-        // Remove .pandora.filename mods
-        if let Ok(read_dir) = std::fs::read_dir(&mod_dir) {
-            for entry in read_dir {
-                let Ok(entry) = entry else {
-                    continue;
-                };
-                let file_name = entry.file_name();
-                if file_name.as_encoded_bytes().starts_with(b".pandora.") {
-                    log::trace!("Removing temporary mod file {:?}", &file_name);
-                    _ = std::fs::remove_file(entry.path());
-                }
-            }
-        }
-
         let mut modpack_installs = Vec::new();
+        let content_library_dir = self.directories.content_library_dir.clone();
 
         for summary in &*mods {
             if !summary.enabled {
                 continue;
             }
 
-            if let ContentType::ModrinthModpack { downloads, overrides, .. } = &summary.content_summary.extra {
-                let downloads = downloads.clone();
+            match &summary.content_summary.extra {
+                ContentType::ModrinthModpack { downloads, overrides, .. } => {
 
-                let filtered_downloads = downloads.iter().filter(|dl| {
-                    if let Some(env) = dl.env {
-                        if env.client == ModrinthSideRequirement::Unsupported {
-                            return false;
-                        }
-                    }
+                    let downloads = downloads.clone();
 
-                    if let Some(metadata) = self.mod_metadata_manager.get_cached_by_sha1(&*dl.hashes.sha1) {
-                        if let Some(id) = &metadata.id && summary.disabled_children.disabled_ids.contains(id) {
-                            return false;
-                        }
-                        if let Some(name) = &metadata.name && summary.disabled_children.disabled_names.contains(name) {
-                            return false;
-                        }
-                    }
-
-                    !summary.disabled_children.disabled_filenames.contains(&dl.path)
-                });
-
-                let content_install = ContentInstall {
-                    target: bridge::install::InstallTarget::Library,
-                    loader_hint: loader,
-                    version_hint: Some(minecraft_version.into()),
-                    files: filtered_downloads.clone().filter_map(|file| {
-                        let path = SafePath::new(&file.path)?;
-                        Some(ContentInstallFile {
-                            replace_old: None,
-                            path: ContentInstallPath::Safe(path),
-                            download: ContentDownload::Url {
-                                url: file.downloads[0].clone(),
-                                sha1: file.hashes.sha1.clone(),
-                                size: file.file_size,
-                            },
-                            content_source: schema::content::ContentSource::ModrinthUnknown,
-                        })
-                    }).collect(),
-                };
-
-                self.install_content(content_install, modal_action.clone()).await;
-
-                modpack_installs.push(ModpackInstall {
-                    hashed_downloads: filtered_downloads.map(|download| {
-                        HashedDownload {
-                            sha1: download.hashes.sha1.clone(),
-                            path: download.path.clone(),
-                            add_content_folder_to_path: false,
-                        }
-                    }).collect(),
-                    aux_path: crate::pandora_aux_path_for_content(&summary),
-                    overrides: overrides.clone(),
-                });
-            } else if let ContentType::CurseforgeModpack { files, summaries, overrides, .. } = &summary.content_summary.extra {
-                // todo: apply recommended ram from modpack
-
-                let mut file_ids = Vec::new();
-                let mut hashed_downloads = Vec::new();
-
-                for (index, file) in files.iter().enumerate() {
-                    let Some((_, Some(file_info))) = summaries.get(index) else {
-                        file_ids.push(file.file_id);
-                        continue;
-                    };
-
-                    let file_hash_as_str = hex::encode(file_info.hash);
-
-                    hashed_downloads.push(HashedDownload {
-                        sha1: file_hash_as_str.into(),
-                        path: file_info.filename.clone(),
-                        add_content_folder_to_path: true,
-                    });
-                }
-
-                if !file_ids.is_empty() {
-                    let files_result = self.meta.fetch(&CurseforgeGetFilesMetadataItem(&CurseforgeGetFilesRequest {
-                        file_ids,
-                    })).await;
-
-                    if let Ok(files) = files_result {
-                        let mut files_to_install = Vec::new();
-
-                        for file in files.data.iter() {
-                            let sha1 = file.hashes.iter()
-                                .find(|hash| hash.algo == 1).map(|hash| &hash.value);
-                            let Some(sha1) = sha1 else {
-                                continue;
-                            };
-
-                            let mut hash = [0u8; 20];
-                            let Ok(_) = hex::decode_to_slice(&**sha1, &mut hash) else {
-                                log::warn!("File {} has invalid sha1: {}", file.file_name, sha1);
-                                continue;
-                            };
-
-                            self.mod_metadata_manager.set_cached_curseforge_info(file.id, CachedCurseforgeFileInfo {
-                                hash,
-                                filename: file.file_name.clone(),
-                                disabled_third_party_downloads: file.download_url.is_none()
-                            });
-                            if let Some(download_url) = &file.download_url {
-                                hashed_downloads.push(HashedDownload {
-                                    sha1: sha1.clone(),
-                                    path: file.file_name.clone(),
-                                    add_content_folder_to_path: true,
-                                });
-                                files_to_install.push(ContentInstallFile {
-                                    replace_old: None,
-                                    path: ContentInstallPath::Automatic,
-                                    download: ContentDownload::Url {
-                                        url: download_url.clone(),
-                                        sha1: sha1.clone(),
-                                        size: file.file_length as usize,
-                                    },
-                                    content_source: ContentSource::CurseforgeProject { project_id: file.mod_id }
-                                });
+                    let filtered_downloads = downloads.iter().filter(|dl| {
+                        if let Some(env) = dl.env {
+                            if env.client == ModrinthSideRequirement::Unsupported {
+                                return false;
                             }
                         }
 
-                        if !files_to_install.is_empty() {
-                            let content_install = ContentInstall {
-                                target: bridge::install::InstallTarget::Library,
-                                loader_hint: loader,
-                                version_hint: Some(minecraft_version.into()),
-                                files: files_to_install.into(),
-                            };
+                        if let Some(metadata) = self.mod_metadata_manager.get_cached_by_sha1(&*dl.hashes.sha1) {
+                            if let Some(id) = &metadata.id && summary.disabled_children.disabled_ids.contains(id) {
+                                return false;
+                            }
+                            if let Some(name) = &metadata.name && summary.disabled_children.disabled_names.contains(name) {
+                                return false;
+                            }
+                        }
 
-                            self.install_content(content_install, modal_action.clone()).await;
+                        !summary.disabled_children.disabled_filenames.contains(&dl.path)
+                    });
+
+                    let content_install = ContentInstall {
+                        target: bridge::install::InstallTarget::Library,
+                        loader_hint: loader,
+                        version_hint: Some(minecraft_version.into()),
+                        files: filtered_downloads.clone().filter_map(|file| {
+                            let path = SafePath::new(&file.path)?;
+                            Some(ContentInstallFile {
+                                replace_old: None,
+                                path: ContentInstallPath::Safe(path),
+                                download: ContentDownload::Url {
+                                    url: file.downloads[0].clone(),
+                                    sha1: file.hashes.sha1.clone(),
+                                    size: file.file_size,
+                                },
+                                content_source: schema::content::ContentSource::ModrinthUnknown,
+                            })
+                        }).collect(),
+                    };
+
+                    self.install_content(content_install, modal_action.clone()).await;
+
+                    modpack_installs.push(ModpackInstall {
+                        hashed_downloads: filtered_downloads.map(|download| {
+                            HashedDownload {
+                                sha1: download.hashes.sha1.clone(),
+                                path: download.path.clone(),
+                                add_content_folder_to_path: false,
+                            }
+                        }).collect(),
+                        aux_path: crate::pandora_aux_path_for_content(&summary),
+                        overrides: overrides.clone(),
+                    });
+                },
+                ContentType::CurseforgeModpack { files, summaries, overrides, .. } => {
+
+                    // todo: apply recommended ram from modpack
+
+                    let mut file_ids = Vec::new();
+                    let mut hashed_downloads = Vec::new();
+
+                    for (index, file) in files.iter().enumerate() {
+                        let Some((_, Some(file_info))) = summaries.get(index) else {
+                            file_ids.push(file.file_id);
+                            continue;
+                        };
+
+                        let file_hash_as_str = hex::encode(file_info.hash);
+
+                        hashed_downloads.push(HashedDownload {
+                            sha1: file_hash_as_str.into(),
+                            path: file_info.filename.clone(),
+                            add_content_folder_to_path: true,
+                        });
+                    }
+
+                    if !file_ids.is_empty() {
+                        let files_result = self.meta.fetch(&CurseforgeGetFilesMetadataItem(&CurseforgeGetFilesRequest {
+                            file_ids,
+                        })).await;
+
+                        if let Ok(files) = files_result {
+                            let mut files_to_install = Vec::new();
+
+                            for file in files.data.iter() {
+                                let sha1 = file.hashes.iter()
+                                    .find(|hash| hash.algo == 1).map(|hash| &hash.value);
+                                let Some(sha1) = sha1 else {
+                                    continue;
+                                };
+
+                                let mut hash = [0u8; 20];
+                                let Ok(_) = hex::decode_to_slice(&**sha1, &mut hash) else {
+                                    log::warn!("File {} has invalid sha1: {}", file.file_name, sha1);
+                                    continue;
+                                };
+
+                                self.mod_metadata_manager.set_cached_curseforge_info(file.id, CachedCurseforgeFileInfo {
+                                    hash,
+                                    filename: file.file_name.clone(),
+                                    disabled_third_party_downloads: file.download_url.is_none()
+                                });
+                                if let Some(download_url) = &file.download_url {
+                                    hashed_downloads.push(HashedDownload {
+                                        sha1: sha1.clone(),
+                                        path: file.file_name.clone(),
+                                        add_content_folder_to_path: true,
+                                    });
+                                    files_to_install.push(ContentInstallFile {
+                                        replace_old: None,
+                                        path: ContentInstallPath::Automatic,
+                                        download: ContentDownload::Url {
+                                            url: download_url.clone(),
+                                            sha1: sha1.clone(),
+                                            size: file.file_length as usize,
+                                        },
+                                        content_source: ContentSource::CurseforgeProject { project_id: file.mod_id }
+                                    });
+                                }
+                            }
+
+                            if !files_to_install.is_empty() {
+                                let content_install = ContentInstall {
+                                    target: bridge::install::InstallTarget::Library,
+                                    loader_hint: loader,
+                                    version_hint: Some(minecraft_version.into()),
+                                    files: files_to_install.into(),
+                                };
+
+                                self.install_content(content_install, modal_action.clone()).await;
+                            }
                         }
                     }
-                }
 
-                modpack_installs.push(ModpackInstall {
-                    hashed_downloads,
-                    aux_path: crate::pandora_aux_path_for_content(&summary),
-                    overrides: overrides.clone(),
-                });
+                    modpack_installs.push(ModpackInstall {
+                        hashed_downloads,
+                        aux_path: crate::pandora_aux_path_for_content(&summary),
+                        overrides: overrides.clone(),
+                    });
+                },
+                _ => {
+                    let path = &summary.path;
+                    let Ok(rel_path) = path.strip_prefix(&mod_dir) else {
+                        continue;
+                    };
+
+                    let extension = path.extension().and_then(OsStr::to_str);
+                    let content_library_path = crate::create_content_library_path(&content_library_dir, summary.content_summary.hash, extension);
+
+                    if content_library_path.exists() {
+                        mod_copies.push(PrelaunchModCopy {
+                            path: rel_path.to_path_buf(),
+                            source: PrelaunchModCopySource::FromContentLibrary { hash: summary.content_summary.hash },
+                        });
+                    } else if let Ok(file) = std::fs::read(&path) {
+                        mod_copies.push(PrelaunchModCopy {
+                            path: rel_path.to_path_buf(),
+                            source: PrelaunchModCopySource::FromBytes { bytes: file.into() },
+                        });
+                    }
+                }
             }
         }
-
-        let dot_minecraft_path = if let Some(instance) = self.instance_state.read().instances.get(id) {
-            instance.dot_minecraft_path.clone()
-        } else {
-            return Vec::new();
-        };
-
-        let mut add_mods = Vec::new();
 
         for modpack_install in modpack_installs {
             let overrides = modpack_install.overrides;
@@ -986,18 +1085,15 @@ impl BackendState {
                     }
                 }
 
-                if dest_path.starts_with("mods") && dest_path.extension() == Some("jar") {
-                    if loader_supports_add_mods {
-                        add_mods.push(path);
-                    } else if let Some(filename) = dest_path.file_name() {
-                        let filename = format!(".pandora.{filename}");
-                        let hidden_dest_path = mod_dir.join(filename);
-                        if let Err(err) = crate::hard_link_or_copy(&path, &hidden_dest_path) {
-                            log::error!("Failed to install modpack mod to {:?}: {err}", hidden_dest_path);
+                if let Some(filename) = dest_path.strip_prefix("mods") {
+                    mod_copies.push(PrelaunchModCopy {
+                        path: filename.to_path(Path::new("")),
+                        source: PrelaunchModCopySource::FromContentLibrary {
+                            hash: expected_hash
                         }
-                    }
+                    });
                 } else {
-                    let dest_path = dest_path.to_path(&dot_minecraft_path);
+                    let dest_path = dest_path.to_path(&dot_minecraft_dir);
 
                     if should_override_file(&file.path, &dest_path, expected_hash, &aux) {
                         if let Some(aux) = &mut aux {
@@ -1023,25 +1119,15 @@ impl BackendState {
                     hasher.update(&file);
                     let expected_hash = hasher.finalize().into();
 
-                    let path = crate::create_content_library_path(content_library_dir, expected_hash, rel_path.extension());
-
-                    if !path.exists() {
-                        let _ = std::fs::create_dir_all(path.parent().unwrap());
-                        let _ = std::fs::write(&path, file);
-                    }
-
-                    if rel_path.starts_with("mods") && let Some(extension) = rel_path.extension() && extension == "jar" {
-                        if loader_supports_add_mods {
-                            add_mods.push(path);
-                        } else if let Some(filename) = rel_path.file_name() {
-                            let filename = format!(".pandora.{filename}");
-                            let hidden_dest_path = mod_dir.join(filename);
-                            if let Err(err) = crate::hard_link_or_copy(&path, &hidden_dest_path) {
-                                log::error!("Failed to install modpack override mod to {:?}: {err}", hidden_dest_path);
+                    if let Some(filename) = rel_path.strip_prefix("mods") {
+                        mod_copies.push(PrelaunchModCopy {
+                            path: filename.to_path(Path::new("")),
+                            source: PrelaunchModCopySource::FromBytes {
+                                bytes: file.clone()
                             }
-                        }
+                        });
                     } else {
-                        let dest_path = rel_path.to_path(&dot_minecraft_path);
+                        let dest_path = rel_path.to_path(&dot_minecraft_dir);
 
                         if should_override_file(&rel_path.as_str(), &dest_path, expected_hash, &aux) {
                             if let Some(aux) = &mut aux {
@@ -1050,8 +1136,7 @@ impl BackendState {
                                 aux_changed = true;
                             }
 
-                            let _ = std::fs::create_dir_all(dest_path.parent().unwrap());
-                            let _ = std::fs::copy(path, dest_path);
+                            _ = crate::write_safe(&dest_path, &file);
                         }
                     }
                     tracker.add_count(1);
@@ -1067,10 +1152,38 @@ impl BackendState {
                 tracker.set_finished(ProgressTrackerFinishType::Fast);
             }
         }
+    }
 
-        add_mods.sort();
-        add_mods.dedup();
-        add_mods
+    fn prelaunch_create_mods_dir(&self, mod_copies: Vec<PrelaunchModCopy>, mods_dir: &Path, modal_action: &ModalAction) -> std::io::Result<()> {
+        let tracker = ProgressTracker::new("Copying immutable mods directory".into(), self.send.clone());
+        modal_action.trackers.push(tracker.clone());
+
+        tracker.set_total(mod_copies.len());
+        tracker.notify();
+
+        let content_library_dir = &self.directories.content_library_dir.clone();
+
+        for mod_copy in mod_copies {
+            let target_path = mods_dir.join(&mod_copy.path);
+            if let Some(parent) = target_path.parent() {
+                _ = std::fs::create_dir_all(parent);
+            }
+            match mod_copy.source {
+                PrelaunchModCopySource::FromContentLibrary { hash } => {
+                    let extension = mod_copy.path.extension().and_then(OsStr::to_str);
+                    let path = crate::create_content_library_path(&content_library_dir, hash, extension);
+                    std::fs::copy(path, target_path)?;
+                },
+                PrelaunchModCopySource::FromBytes { bytes } => {
+                    std::fs::write(target_path, &bytes)?;
+                },
+            }
+            tracker.add_count(1);
+            tracker.notify();
+        }
+
+        tracker.set_finished(ProgressTrackerFinishType::Normal);
+        Ok(())
     }
 
     pub async fn create_instance_sanitized(&self, name: &str, version: &str, loader: Loader, icon: Option<EmbeddedOrRaw>) -> Option<PathBuf> {
@@ -1361,4 +1474,18 @@ pub enum LoginError {
     NeedsUserInteraction,
     #[error("Cancelled by user")]
     CancelledByUser,
+}
+
+struct PrelaunchModCopy {
+    path: PathBuf,
+    source: PrelaunchModCopySource
+}
+
+enum PrelaunchModCopySource {
+    FromContentLibrary {
+        hash: [u8; 20]
+    },
+    FromBytes {
+        bytes: Arc<[u8]>,
+    }
 }
