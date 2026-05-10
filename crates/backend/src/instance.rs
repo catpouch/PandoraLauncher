@@ -996,7 +996,7 @@ fn create_instance_content_summary(path: &Path, mod_metadata_manager: &Arc<ModMe
         return None;
     };
 
-    let summary = mod_metadata_manager.get_file(&mut file);
+    let summary = mod_metadata_manager.get_file(&mut file, path.extension());
 
     let filename_without_disabled = if !enabled {
         &filename[..filename.len()-".disabled".len()]

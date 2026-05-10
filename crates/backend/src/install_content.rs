@@ -771,6 +771,7 @@ impl BackendState {
                     let path = path.clone();
                     let mod_metadata_manager = self.mod_metadata_manager.clone();
                     let tracker = tracker.clone();
+                    let extension = extension.map(OsString::from);
                     tokio::task::spawn_blocking(move || {
                         let valid_hash_on_disk = crate::check_sha1_hash(&path, hash).unwrap_or(false);
 
@@ -781,7 +782,7 @@ impl BackendState {
                             std::fs::write(&path, &data)?;
                         }
 
-                        std::io::Result::Ok(mod_metadata_manager.get_bytes(&data))
+                        std::io::Result::Ok(mod_metadata_manager.get_bytes(&data, extension.as_deref()))
                     }).await.unwrap()?
                 };
 
