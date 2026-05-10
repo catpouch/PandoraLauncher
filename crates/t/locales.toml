@@ -182,7 +182,7 @@ hu = "PBR"
 [modrinth.category.semi-realistic]
 en = "Semi-realistic"
 de = "Semi-Realistisch"
-hu = "Félig valósághű
+hu = "Félig valósághű"
 [modrinth.category.reflections]
 en = "Reflections"
 de = "Reflektionen"
@@ -337,7 +337,7 @@ hu = "Alacsony"
 [modrinth.category.medium]
 en = "Medium"
 de = "Mittel"
-hu = "Közepes
+hu = "Közepes"
 [modrinth.category.high]
 en = "High"
 de = "Hoch"
@@ -411,7 +411,7 @@ hu = "Csak kliens"
 [modrinth.environment.client_only_server_optional]
 en = "Client (server optional)"
 de = "Client (Server Optional)"
-hu = "Kliens (Szerver opcionális)
+hu = "Kliens (Szerver opcionális)"
 [modrinth.environment.server_only]
 en = "Server only"
 de = "Nur Server"
@@ -491,7 +491,7 @@ hu = "Frissítés"
 [common.min]
 en = "Min"
 de = "Minimum"
-hu = "Minimum
+hu = "Minimum"
 [common.max]
 en = "Max"
 de = "Maximum"
@@ -788,7 +788,7 @@ hu = "Minecraft verzió"
 [instance.show_snapshots]
 en = "Show Snapshots"
 de = "Vorabversionen anzeigen"
-hu = "Snapshot-ok mutatása
+hu = "Snapshot-ok mutatása"
 [instance.modloader]
 en = "Modloader"
 de = "Modloader"
@@ -878,9 +878,6 @@ hu = "Szerző"
 [instance.export.recommended_ram]
 en = "Recommended RAM"
 hu = "Ajánlott RAM"
-[instance.export.optional_files]
-en = "Treat .disabled as optional files"
-hu = "A .disabled fájlok opcionális fájlokként kezelése
 [instance.versions_loading.game_versions]
 en = "Loading Minecraft Versions..."
 de = "Lade Minecraft Versionen..."
@@ -971,7 +968,7 @@ hu = "Példány törlése: ${name: &str}"
 [instance.delete_dialog.label]
 en = "I want to delete this instance"
 de = "Ich möchte diese Instanz löschen"
-hu = "Törölni akarom ezt a példányt
+hu = "Törölni akarom ezt a példányt"
 [instance.delete_dialog.check]
 en = "I have read and understand these effects"
 de = "Ich habe die Konsequenzen gelesen und verstanden"
@@ -1473,7 +1470,7 @@ hu = "Xaero's Minimap (xaero) mappájának szinkronizálása"
 [instance.sync.targets.journeymap]
 en = "Sync Journeymap (journeymap) folder"
 de = "Synchronisiere Journeymap Ordner (journeymap)"
-hu = "Journeymap (journeymap) mappájának szinkronizálása")
+hu = "Journeymap (journeymap) mappájának szinkronizálása"
 [instance.sync.targets.bobby]
 en = "Sync Bobby (.bobby) folder"
 de = "Synchronisiere Bobby Ordner (.bobby)"
@@ -1578,7 +1575,7 @@ hu = "Hitelesítés"
 [settings.proxy.use_auth]
 en = "Use Authentication"
 de = "Nutze Authentifizierung"
-hu = "Hitelesítés használata
+hu = "Hitelesítés használata"
 [settings.proxy.username]
 en = "Username"
 de = "Nutzername"
@@ -1623,7 +1620,7 @@ hu = "Hozzáadás fájlból"
 [skins.select_skin]
 en = "Select Skin"
 de = "Wähle ein Skin aus"
-hu = "Válassz egy kinézetet
+hu = "Válassz egy kinézetet"
 [skins.copy_from_player]
 en = "Copy from player"
 de = "Von Spieler kopieren"
