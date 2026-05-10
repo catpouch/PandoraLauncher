@@ -77,6 +77,7 @@ pub struct InstanceContentSummary {
     pub filename: Arc<str>,
     pub lowercase_search_keys: Arc<[Arc<str>]>,
     pub filename_hash: u64,
+    pub modified_unix_ms: u64,
     pub path: Arc<Path>,
     pub can_toggle: bool,
     pub enabled: bool,
@@ -89,6 +90,7 @@ pub struct InstanceContentSummary {
 pub struct ContentSummary {
     pub id: Option<Arc<str>>,
     pub hash: [u8; 20],
+    pub filesize: Option<u64>,
     pub name: Option<Arc<str>>,
     pub version_str: Arc<str>,
     pub rich_description: Option<Arc<FlatTextComponent>>,
@@ -107,6 +109,7 @@ pub static UNKNOWN_CONTENT_SUMMARY: Lazy<Arc<ContentSummary>> = Lazy::new(|| {
     Arc::new(ContentSummary {
         id: None,
         hash: [0_u8; 20],
+        filesize: None,
         name: None,
         authors: "".into(),
         version_str: "unknown".into(),

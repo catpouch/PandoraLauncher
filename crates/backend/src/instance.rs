@@ -996,7 +996,21 @@ fn create_instance_content_summary(path: &Path, mod_metadata_manager: &Arc<ModMe
         return None;
     };
 
-    let summary = mod_metadata_manager.get_file(&mut file, path.extension());
+    let metadata = file.metadata().ok();
+    let modified_unix_ms = if let Some(metadata) = &metadata {
+        let mut time = SystemTime::UNIX_EPOCH;
+        if let Ok(created) = metadata.created() {
+            time = time.max(created);
+        }
+        if let Ok(modified) = metadata.modified() {
+            time = time.max(modified);
+        }
+        time.duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_millis().min(u64::MAX as u128) as u64
+    } else {
+        0
+    };
+
+    let summary = mod_metadata_manager.get_file(&mut file, metadata, path.extension());
 
     let filename_without_disabled = if !enabled {
         &filename[..filename.len()-".disabled".len()]
@@ -1037,6 +1051,7 @@ fn create_instance_content_summary(path: &Path, mod_metadata_manager: &Arc<ModMe
         lowercase_search_keys,
         filename,
         filename_hash,
+        modified_unix_ms,
         path: path.into(),
         can_toggle: true,
         enabled,
@@ -1076,6 +1091,7 @@ fn try_load_resourcepack_folder(pack_mcmeta_bytes: &[u8], pack_png_bytes: Option
         lowercase_search_keys,
         filename,
         filename_hash,
+        modified_unix_ms: 0,
         path: path.into(),
         can_toggle: false,
         enabled: true,

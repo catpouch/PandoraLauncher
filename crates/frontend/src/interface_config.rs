@@ -1,5 +1,6 @@
-use std::{io::Write, path::Path, sync::Arc, time::Duration};
+use std::{cmp::Ordering, io::Write, path::Path, sync::Arc, time::Duration};
 
+use bridge::instance::InstanceContentSummary;
 use gpui::{App, SharedString, Task};
 use rand::RngCore;
 use schema::{curseforge::CurseforgeClassId, modrinth::ModrinthProjectType};
@@ -65,12 +66,13 @@ pub struct InterfaceConfig {
     pub skin_list_show_3d: bool,
 }
 
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, strum::EnumIter)]
 #[serde(rename_all = "lowercase")]
 pub enum InstanceContentSortKey {
     #[default]
-    Filename,
     Name,
+    ModId,
+    Filename,
     ModifiedTime,
     FileSize,
 }
@@ -78,10 +80,37 @@ pub enum InstanceContentSortKey {
 impl InstanceContentSortKey {
     pub fn name(self) -> SharedString {
         match self {
-            InstanceContentSortKey::Filename => "File name".into(),
-            InstanceContentSortKey::Name => "Mod name".into(),
-            InstanceContentSortKey::ModifiedTime => "Modified time".into(),
-            InstanceContentSortKey::FileSize => "File size".into(),
+            InstanceContentSortKey::Name => "Name".into(),
+            InstanceContentSortKey::ModId => "Mod Id".into(),
+            InstanceContentSortKey::Filename => "Filename".into(),
+            InstanceContentSortKey::ModifiedTime => "Modified Time".into(),
+            InstanceContentSortKey::FileSize => "Filesize".into(),
+        }
+    }
+
+    pub fn compare(self, a: &InstanceContentSummary, b: &InstanceContentSummary) -> Ordering {
+        match self {
+            InstanceContentSortKey::Name => {
+                let name_a = a.content_summary.name.as_deref().or(a.content_summary.id.as_deref()).unwrap_or(&*a.filename);
+                let name_b = b.content_summary.name.as_deref().or(b.content_summary.id.as_deref()).unwrap_or(&*b.filename);
+                lexical_sort::natural_lexical_cmp(name_a, name_b)
+            },
+            InstanceContentSortKey::ModId => {
+                let name_a = a.content_summary.id.as_deref().or(a.content_summary.name.as_deref()).unwrap_or(&*a.filename);
+                let name_b = b.content_summary.id.as_deref().or(b.content_summary.name.as_deref()).unwrap_or(&*b.filename);
+                lexical_sort::natural_lexical_cmp(name_a, name_b)
+            },
+            InstanceContentSortKey::Filename => {
+                let name_a = &*a.filename;
+                let name_b = &*b.filename;
+                lexical_sort::natural_lexical_cmp(name_a, name_b)
+            },
+            InstanceContentSortKey::ModifiedTime => {
+                a.modified_unix_ms.cmp(&b.modified_unix_ms).reverse()
+            },
+            InstanceContentSortKey::FileSize => {
+                a.content_summary.filesize.unwrap_or(0).cmp(&b.content_summary.filesize.unwrap_or(0)).reverse()
+            },
         }
     }
 }

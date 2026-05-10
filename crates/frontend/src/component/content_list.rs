@@ -1,6 +1,6 @@
 use std::{hash::{DefaultHasher, Hash, Hasher}, sync::{
     Arc, atomic::{AtomicUsize, Ordering}
-}, time::UNIX_EPOCH};
+}};
 
 use bridge::{
     handle::BackendHandle, instance::{ContentSummary, ContentType, InstanceContentID, InstanceContentSummary, InstanceID, UNKNOWN_CONTENT_SUMMARY}, message::MessageToBackend, modal_action::ModalAction
@@ -12,6 +12,7 @@ use gpui_component::{
 use parking_lot::Mutex;
 use rustc_hash::FxHashSet;
 use schema::{loader::Loader, text_component::FlatTextComponent};
+use strum::IntoEnumIterator;
 use ustr::Ustr;
 
 use crate::{component::error_alert::ErrorAlert, icon::PandoraIcon, interface_config::{InstanceContentSortKey, InterfaceConfig}, png_render_cache};
@@ -22,12 +23,41 @@ struct ContentEntryChild {
     parent_filename_hash: u64,
     parent: InstanceContentID,
     path: Arc<str>,
+    filesize: u64,
     lowercase_search_keys: Arc<[Arc<str>]>,
     disabled_default: bool,
     enabled: bool,
     parent_enabled: bool,
     disabled_third_party_downloads: bool,
     is_missing: bool,
+}
+
+impl ContentEntryChild {
+    pub fn compare_by(&self, other: &ContentEntryChild, key: InstanceContentSortKey) -> std::cmp::Ordering {
+        match key {
+            InstanceContentSortKey::Name => {
+                let name_a = self.summary.name.as_deref().or(self.summary.id.as_deref()).unwrap_or(&*self.path);
+                let name_b = other.summary.name.as_deref().or(other.summary.id.as_deref()).unwrap_or(&*other.path);
+                lexical_sort::natural_lexical_cmp(name_a, name_b)
+            },
+            InstanceContentSortKey::ModId => {
+                let name_a = self.summary.id.as_deref().or(self.summary.name.as_deref()).unwrap_or(&*self.path);
+                let name_b = other.summary.id.as_deref().or(other.summary.name.as_deref()).unwrap_or(&*other.path);
+                lexical_sort::natural_lexical_cmp(name_a, name_b)
+            },
+            InstanceContentSortKey::Filename => {
+                let name_a = &*self.path;
+                let name_b = &*other.path;
+                lexical_sort::natural_lexical_cmp(name_a, name_b)
+            },
+            InstanceContentSortKey::ModifiedTime => {
+                std::cmp::Ordering::Equal
+            },
+            InstanceContentSortKey::FileSize => {
+                self.filesize.cmp(&other.filesize).reverse()
+            },
+        }
+    }
 }
 
 enum SummaryOrChild {
@@ -457,31 +487,11 @@ impl ContentListDelegate {
         struct Item {
             modification: InstanceContentSummary,
             children: Vec<ContentEntryChild>,
-            sort_key: Arc<str>,
-            modified_unix_ms: Option<u128>,
-            file_size: Option<u64>,
         }
 
         let mut items = Vec::with_capacity(new_content.len());
 
         for modification in new_content.iter() {
-            let sort_key_source: &str = match self.sort_key {
-                InstanceContentSortKey::Filename => modification.filename.as_ref(),
-                InstanceContentSortKey::Name => modification.content_summary.name.as_deref().unwrap_or(modification.filename.as_ref()),
-                InstanceContentSortKey::ModifiedTime | InstanceContentSortKey::FileSize => modification.content_summary.name.as_deref().unwrap_or(modification.filename.as_ref()),
-            };
-            let sort_key: Arc<str> = sort_key_source.to_ascii_lowercase().into();
-
-            let (modified_unix_ms, file_size) = std::fs::metadata(modification.path.as_ref())
-                .ok()
-                .map(|meta| {
-                    let modified_unix_ms = meta.modified().ok().and_then(|t| {
-                        t.duration_since(UNIX_EPOCH).ok().map(|d| d.as_millis() as u128)
-                    });
-                    (modified_unix_ms, Some(meta.len()))
-                })
-                .unwrap_or((None, None));
-
             let mut inner_children = Vec::new();
 
             let extra = &modification.content_summary.extra;
@@ -500,6 +510,7 @@ impl ContentListDelegate {
                         parent: modification.id,
                         lowercase_search_keys,
                         path: filename,
+                        filesize: 0,
                         disabled_default: false,
                         enabled: true,
                         parent_enabled: modification.enabled,
@@ -541,12 +552,19 @@ impl ContentListDelegate {
                         .chain(std::iter::once(lowercase_filename))
                         .collect();
 
+                    let filesize = match &file.source {
+                        bridge::instance::ModpackFileSource::DownloadUrl { size, .. } => *size as u64,
+                        bridge::instance::ModpackFileSource::DownloadCurseforge { .. } => 0,
+                        bridge::instance::ModpackFileSource::Builtin { bytes } => bytes.len() as u64,
+                    };
+
                     inner_children.push(ContentEntryChild {
                         summary,
                         parent_filename_hash: modification.filename_hash,
                         parent: modification.id,
                         lowercase_search_keys,
                         path: file.path.as_str().into(),
+                        filesize,
                         disabled_default: file.default_disabled,
                         enabled,
                         parent_enabled: modification.enabled,
@@ -559,9 +577,6 @@ impl ContentListDelegate {
             items.push(Item {
                 modification: modification.clone(),
                 children: inner_children,
-                sort_key,
-                modified_unix_ms,
-                file_size,
             });
         }
 
@@ -573,25 +588,23 @@ impl ContentListDelegate {
                 return b.modification.enabled.cmp(&a.modification.enabled);
             }
 
-            match sort_key {
-                InstanceContentSortKey::ModifiedTime => {
-                    match (a.modified_unix_ms, b.modified_unix_ms) {
-                        (Some(a), Some(b)) => b.cmp(&a),
-                        (Some(_), None) => std::cmp::Ordering::Less,
-                        (None, Some(_)) => std::cmp::Ordering::Greater,
-                        (None, None) => lexical_sort::natural_lexical_cmp(a.sort_key.as_ref(), b.sort_key.as_ref()),
-                    }
-                }
-                InstanceContentSortKey::FileSize => {
-                    match (a.file_size, b.file_size) {
-                        (Some(a), Some(b)) => b.cmp(&a),
-                        (Some(_), None) => std::cmp::Ordering::Less,
-                        (None, Some(_)) => std::cmp::Ordering::Greater,
-                        (None, None) => lexical_sort::natural_lexical_cmp(a.sort_key.as_ref(), b.sort_key.as_ref()),
-                    }
-                }
-                _ => lexical_sort::natural_lexical_cmp(a.sort_key.as_ref(), b.sort_key.as_ref()),
+            let ordering = sort_key.compare(&a.modification, &b.modification);
+            if ordering != std::cmp::Ordering::Equal {
+                return ordering;
             }
+
+            for key in InstanceContentSortKey::iter() {
+                if key == sort_key {
+                    continue;
+                }
+
+                let ordering = key.compare(&a.modification, &b.modification);
+                if ordering != std::cmp::Ordering::Equal {
+                    return ordering;
+                }
+            }
+
+            return std::cmp::Ordering::Equal;
         });
 
         for item in &mut items {
@@ -600,18 +613,23 @@ impl ContentListDelegate {
                     return b.enabled.cmp(&a.enabled);
                 }
 
-                let key_a: &str = match sort_key {
-                    InstanceContentSortKey::Filename => a.path.as_ref(),
-                    InstanceContentSortKey::Name => a.summary.name.as_deref().unwrap_or(a.path.as_ref()),
-                    InstanceContentSortKey::ModifiedTime | InstanceContentSortKey::FileSize => a.path.as_ref(),
-                };
-                let key_b: &str = match sort_key {
-                    InstanceContentSortKey::Filename => b.path.as_ref(),
-                    InstanceContentSortKey::Name => b.summary.name.as_deref().unwrap_or(b.path.as_ref()),
-                    InstanceContentSortKey::ModifiedTime | InstanceContentSortKey::FileSize => b.path.as_ref(),
-                };
+                let ordering = a.compare_by(b, sort_key);
+                if ordering != std::cmp::Ordering::Equal {
+                    return ordering;
+                }
 
-                lexical_sort::natural_lexical_cmp(&key_a.to_ascii_lowercase(), &key_b.to_ascii_lowercase())
+                for key in InstanceContentSortKey::iter() {
+                    if key == sort_key {
+                        continue;
+                    }
+
+                    let ordering = a.compare_by(b, key);
+                    if ordering != std::cmp::Ordering::Equal {
+                        return ordering;
+                    }
+                }
+
+                return std::cmp::Ordering::Equal;
             });
         }
 

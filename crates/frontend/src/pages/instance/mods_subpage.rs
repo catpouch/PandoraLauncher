@@ -8,6 +8,7 @@ use gpui_component::{
     ActiveTheme as _, IndexPath, Sizable, WindowExt, button::{Button, ButtonVariants}, h_flex, input::SelectAll, list::ListState, notification::{Notification, NotificationType}, select::{Select, SelectEvent, SelectState}, switch::Switch, v_flex
 };
 use schema::{content::ContentSource, curseforge::CurseforgeClassId, loader::Loader, modrinth::ModrinthProjectType};
+use strum::IntoEnumIterator;
 use ustr::Ustr;
 
 use crate::{component::{content_list::ContentListDelegate, named_dropdown::{NamedDropdown, NamedDropdownItem}}, entity::instance::InstanceEntry, interface_config::{InstanceContentSortKey, InterfaceConfig}, root, ui::PageType};
@@ -50,12 +51,7 @@ impl InstanceModsSubpage {
         let mods = instance.mods.clone();
 
         let sort_dropdown = cx.new(|cx| {
-            let items = [
-                InstanceContentSortKey::Filename,
-                InstanceContentSortKey::Name,
-                InstanceContentSortKey::ModifiedTime,
-                InstanceContentSortKey::FileSize,
-            ].into_iter().map(|key| {
+            let items = InstanceContentSortKey::iter().map(|key| {
                 NamedDropdownItem { name: key.name(), item: key }
             }).collect::<Vec<_>>();
 
@@ -202,9 +198,11 @@ impl Render for InstanceModsSubpage {
             }));
 
         let filter_bar_controls = h_flex()
+            .cursor_default()
+            .block_mouse_except_scroll()
             .gap_3()
             .items_center()
-            .child(div().child(Select::new(&self.sort_dropdown).small().title_prefix("Sort: ".to_string())))
+            .child(div().child(Select::new(&self.sort_dropdown).small().title_prefix("Sort: ")))
             .child(h_flex().gap_1()
                 .child(div().text_sm().child("Enabled first"))
                 .child(Switch::new("mods_enabled_first")
@@ -226,7 +224,7 @@ impl Render for InstanceModsSubpage {
                 )
             )
             .absolute()
-            .top(px(6.0))
+            .top(px(4.0))
             .right(px(12.0));
 
         v_flex().p_4().size_full()
