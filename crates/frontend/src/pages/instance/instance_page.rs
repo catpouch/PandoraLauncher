@@ -10,8 +10,10 @@ use gpui_component::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    entity::{DataEntities, instance::InstanceEntry}, icon::PandoraIcon, interface_config::InterfaceConfig, pages::{instance::{logs_subpage::InstanceLogsSubpage, mods_subpage::InstanceModsSubpage, quickplay_subpage::InstanceQuickplaySubpage, resource_packs_subpage::InstanceResourcePacksSubpage, settings_subpage::InstanceSettingsSubpage}, page::Page}, root,
+    entity::{DataEntities, instance::InstanceEntry}, icon::PandoraIcon, interface_config::InterfaceConfig, pages::{instance::{content_subpage::InstanceContentSubpage, logs_subpage::InstanceLogsSubpage, quickplay_subpage::InstanceQuickplaySubpage, settings_subpage::InstanceSettingsSubpage}, page::Page}, root,
 };
+
+use super::content_subpage::ContentType;
 
 pub struct InstancePage {
     backend_handle: BackendHandle,
@@ -213,10 +215,10 @@ impl InstanceSubpageType {
                 InstanceLogsSubpage::new(instance, backend_handle, window, cx)
             })),
             InstanceSubpageType::Mods => InstanceSubpage::Mods(cx.new(|cx| {
-                InstanceModsSubpage::new(instance, backend_handle, window, cx)
+                InstanceContentSubpage::new(instance, ContentType::Mods, backend_handle, window, cx)
             })),
             InstanceSubpageType::ResourcePacks => InstanceSubpage::ResourcePacks(cx.new(|cx| {
-                InstanceResourcePacksSubpage::new(instance, backend_handle, window, cx)
+                InstanceContentSubpage::new(instance, ContentType::ResourcePacks, backend_handle, window, cx)
             })),
             InstanceSubpageType::Settings => InstanceSubpage::Settings(cx.new(|cx| {
                 InstanceSettingsSubpage::new(instance, data, backend_handle, window, cx)
@@ -229,8 +231,8 @@ impl InstanceSubpageType {
 pub enum InstanceSubpage {
     Quickplay(Entity<InstanceQuickplaySubpage>),
     Logs(Entity<InstanceLogsSubpage>),
-    Mods(Entity<InstanceModsSubpage>),
-    ResourcePacks(Entity<InstanceResourcePacksSubpage>),
+    Mods(Entity<InstanceContentSubpage>),
+    ResourcePacks(Entity<InstanceContentSubpage>),
     Settings(Entity<InstanceSettingsSubpage>),
 }
 

@@ -1,20 +1,19 @@
 use std::sync::{Arc};
 
-use bridge::{instance::InstanceID, message::{BridgeDataLoadState, MessageToBackend}, meta::MetadataRequest, serial::AtomicOptionSerial};
+use bridge::{instance::{ContentFolder, InstanceID}, meta::MetadataRequest};
 use gpui::{prelude::*, *};
 use gpui_component::{
     ActiveTheme, Icon, WindowExt, button::{Button, ButtonVariants}, h_flex, notification::NotificationType, skeleton::Skeleton, tab::{Tab, TabBar}, text::TextView, v_flex
 };
-use rustc_hash::{FxHashMap};
 use schema::{content::ContentSource, loader::Loader, modrinth::{
     ModrinthProjectRequest, ModrinthProjectResult, ModrinthProjectType,
 }};
+use strum::IntoEnumIterator;
 
 use crate::{
     component::error_alert::ErrorAlert, entity::{
-        DataEntities,
-        metadata::{AsMetadataResult, FrontendMetadata, FrontendMetadataResult},
-    }, icon::PandoraIcon, pages::modrinth_page::{InstalledMod, PrimaryAction, env_display, format_downloads, get_primary_action, icon_for}
+        DataEntities, instance::ContentStates, metadata::{AsMetadataResult, FrontendMetadata, FrontendMetadataResult}
+    }, icon::PandoraIcon, pages::modrinth_page::{InstalledContent, PrimaryAction, env_display, format_downloads, get_primary_action, icon_for}
 };
 
 pub struct ModrinthProjectPage {
@@ -26,8 +25,9 @@ pub struct ModrinthProjectPage {
     error: Option<SharedString>,
     active_tab: usize,
     can_install_latest: bool,
-    installed_mods_by_project: FxHashMap<Arc<str>, Vec<InstalledMod>>,
-    mods_load_state: Option<(BridgeDataLoadState, AtomicOptionSerial)>,
+    specific_installed_content: enum_map::EnumMap<ContentFolder, Vec<InstalledContent>>,
+    all_installed_content: Vec<InstalledContent>,
+    content_states: Option<ContentStates>,
 }
 
 impl ModrinthProjectPage {
@@ -39,58 +39,66 @@ impl ModrinthProjectPage {
         cx: &mut Context<Self>,
     ) -> Self {
         let mut can_install_latest = false;
-        let mut installed_mods_by_project: FxHashMap<Arc<str>, Vec<InstalledMod>> = FxHashMap::default();
-        let mut mods_load_state = None;
+        let mut specific_installed_content: enum_map::EnumMap<ContentFolder, Vec<InstalledContent>> = Default::default();
+        let mut all_installed_content = Vec::new();
+        let mut content_states = None;
 
         if let Some(install_for) = install_for {
             if let Some(entry) = data.instances.read(cx).entries.get(&install_for) {
                 let instance = entry.read(cx);
+                let instance_content = instance.content.clone();
+                content_states = Some(instance.content_states.clone());
+                let loader = instance.configuration.loader;
+                let minecraft_version = instance.configuration.minecraft_version;
                 can_install_latest = instance.configuration.loader != Loader::Vanilla;
 
-                let mods = instance.mods.read(cx);
-                for summary in mods.iter() {
-                    let ContentSource::ModrinthProject { project_id } = &summary.content_source else {
-                        continue;
-                    };
-                    let installed = installed_mods_by_project.entry(project_id.clone()).or_default();
-
-                    let status = summary.update.status_if_matches(
-                        instance.configuration.loader,
-                        instance.configuration.minecraft_version.as_str().into()
-                    );
-
-                    installed.push(InstalledMod {
-                        mod_id: summary.id,
-                        status,
-                    });
-                }
-
-                mods_load_state = Some((instance.mods_state.clone(), AtomicOptionSerial::default()));
-
-                let mods = instance.mods.clone();
-                let instance_id = install_for;
-                cx.observe(&mods, move |page, entity, cx| {
-                    page.installed_mods_by_project.clear();
-                    let instances = page.data.instances.read(cx);
-                    let Some(instance_entry) = instances.entries.get(&instance_id) else { return };
-                    let instance = instance_entry.read(cx);
-
-                    let mods = entity.read(cx);
-                    for summary in mods.iter() {
-                        let ContentSource::ModrinthProject { project_id } = &summary.content_source else {
+                for content_folder in ContentFolder::iter() {
+                    for summary in instance_content[content_folder].read(cx).iter() {
+                        let ContentSource::ModrinthProject { project_id: other_project_id } = &summary.content_source else {
                             continue;
                         };
-                        let status = summary.update.status_if_matches(
-                            instance.configuration.loader,
-                            instance.configuration.minecraft_version.as_str().into()
-                        );
-                        let installed = page.installed_mods_by_project.entry(project_id.clone()).or_default();
-                        installed.push(InstalledMod {
-                            mod_id: summary.id,
-                            status,
-                        });
+
+                        if project_id.as_str() != &**other_project_id {
+                            continue;
+                        }
+
+                        let installed_content = InstalledContent {
+                            content_id: summary.id,
+                            status: summary.update.status_if_matches(loader, minecraft_version.as_str()),
+                        };
+                        all_installed_content.push(installed_content);
+                        specific_installed_content[content_folder].push(installed_content);
                     }
-                }).detach();
+
+                    let content = instance_content[content_folder].clone();
+                    let project_id = project_id.clone();
+                    cx.observe(&content, move |page, entity, cx| {
+                        let specific = &mut page.specific_installed_content[content_folder];
+
+                        specific.clear();
+
+                        let content = entity.read(cx);
+                        for summary in content.iter() {
+                            let ContentSource::ModrinthProject { project_id: other_project_id } = &summary.content_source else {
+                                continue;
+                            };
+
+                            if project_id.as_str() != &**other_project_id {
+                                continue;
+                            }
+
+                            specific.push(InstalledContent {
+                                content_id: summary.id,
+                                status: summary.update.status_if_matches(loader, minecraft_version.as_str()),
+                            });
+                        }
+
+                        page.all_installed_content.clear();
+                        for content_folder in ContentFolder::iter() {
+                            page.all_installed_content.extend_from_slice(page.specific_installed_content[content_folder].as_slice());
+                        }
+                    }).detach();
+                }
             }
         }
 
@@ -103,20 +111,16 @@ impl ModrinthProjectPage {
             error: None,
             active_tab: 0,
             can_install_latest,
-            installed_mods_by_project,
-            mods_load_state,
+            specific_installed_content,
+            all_installed_content,
+            content_states,
         };
         page.fetch_project(cx);
         page
     }
 
-    fn get_primary_action(&self, project_id: &str, cx: &App) -> PrimaryAction {
-        get_primary_action(
-            project_id,
-            self.can_install_latest,
-            &self.installed_mods_by_project,
-            cx,
-        )
+    fn get_primary_action(&self, cx: &App) -> PrimaryAction {
+        get_primary_action(self.can_install_latest, Some(&self.all_installed_content), cx)
     }
 
     fn fetch_project(&mut self, cx: &mut Context<Self>) {
@@ -172,13 +176,8 @@ impl Page for ModrinthProjectPage {
 
 impl Render for ModrinthProjectPage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if let Some((mods_state, load_serial)) = &self.mods_load_state
-            && let Some(install_for) = self.install_for
-        {
-            mods_state.set_observed();
-            if mods_state.should_load() {
-                self.data.backend_handle.send_with_serial(MessageToBackend::RequestLoadMods { id: install_for }, load_serial);
-            }
+        if let Some(content_states) = &self.content_states {
+            content_states.observe_all();
         }
 
         let content: AnyElement = if let Some(error) = &self.error {
@@ -246,7 +245,7 @@ impl Render for ModrinthProjectPage {
                     .unwrap_or(t::instance::content::unnamed().into());
 
                 let primary_action = if install_for.is_some() {
-                    self.get_primary_action(&project_id_str, cx)
+                    self.get_primary_action(cx)
                 } else {
                     PrimaryAction::Install
                 };

@@ -516,13 +516,17 @@ impl InstallDialog {
                 && let Some(instance) = self.data.instances.read(cx).entries.get(&instance_id)
             {
                 let mut existing_projects = FxHashSet::default();
-                let existing_mods = instance.read(cx).mods.read(cx);
-                for summary in existing_mods.iter() {
-                    let ContentSource::CurseforgeProject { project_id: project } = &summary.content_source else {
-                        continue;
-                    };
-                    existing_projects.insert(project.clone());
-                }
+
+                for existing_content in instance.read(cx).content.values() {
+                    let existing_content = existing_content.read(cx);
+                    for summary in existing_content.iter() {
+                        let ContentSource::CurseforgeProject { project_id: project } = &summary.content_source else {
+                            continue;
+                        };
+                        existing_projects.insert(project.clone());
+                    }
+                };
+
                 required.retain(|dep| !existing_projects.contains(&dep.mod_id));
             }
 

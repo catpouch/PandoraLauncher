@@ -2409,6 +2409,7 @@ dependencies = [
  "chrono",
  "command",
  "directories",
+ "enum-map",
  "enumset",
  "ftree",
  "futures",

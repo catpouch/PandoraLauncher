@@ -99,6 +99,21 @@ pub struct ContentSummary {
     pub extra: ContentType,
 }
 
+#[derive(enum_map::Enum, Debug, strum::EnumIter, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ContentFolder {
+    Mods,
+    ResourcePacks,
+}
+
+impl ContentFolder {
+    pub fn folder_name(self) -> &'static str {
+        match self {
+            ContentFolder::Mods => "mods",
+            ContentFolder::ResourcePacks => "resourcepacks",
+        }
+    }
+}
+
 impl ContentSummary {
     pub fn is_unknown(summary: &Arc<Self>) -> bool {
         Arc::ptr_eq(summary, &*UNKNOWN_CONTENT_SUMMARY)

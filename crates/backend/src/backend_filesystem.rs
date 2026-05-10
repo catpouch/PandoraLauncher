@@ -1,6 +1,6 @@
 use std::{ffi::OsStr, path::Path, sync::Arc};
 
-use bridge::{instance::InstanceID, message::MessageToFrontend};
+use bridge::{instance::{ContentFolder, InstanceID}, message::MessageToFrontend};
 use notify::{
     EventKind,
     event::{DataChange, ModifyKind, RenameMode},
@@ -8,7 +8,7 @@ use notify::{
 use rustc_hash::{FxHashMap, FxHashSet};
 use strum::IntoEnumIterator;
 
-use crate::{BackendState, FolderChanges, WatchTarget, instance::ContentFolder, skin_manager::SkinManager};
+use crate::{BackendState, FolderChanges, WatchTarget, skin_manager::SkinManager};
 
 #[derive(Debug)]
 enum FilesystemEvent {
@@ -372,7 +372,7 @@ impl BackendState {
                         _ => {},
                     }
                     for folder in ContentFolder::iter() {
-                        if name == folder.path().as_str() {
+                        if name == folder.folder_name() {
                             after_debounce_effects.content_changes.entry((id, folder))
                                 .or_insert_with(FolderChanges::no_changes)
                                 .dirty_all();

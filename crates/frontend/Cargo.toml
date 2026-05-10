@@ -44,6 +44,7 @@ futures.workspace = true
 itertools.workspace = true
 command.workspace = true
 hex.workspace = true
+enum-map.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows.workspace = true

@@ -6,12 +6,11 @@ use anyhow::Context;
 use base64::Engine;
 use bridge::{
     instance::{
-        ContentSummary, ContentUpdateContext, ContentUpdateStatus, InstanceContentID, InstanceContentSummary, InstanceID, InstancePlaytime, InstanceServerSummary, InstanceStatus, InstanceWorldSummary
+        ContentFolder, ContentSummary, ContentUpdateContext, ContentUpdateStatus, InstanceContentID, InstanceContentSummary, InstanceID, InstancePlaytime, InstanceServerSummary, InstanceStatus, InstanceWorldSummary
     }, keep_alive::KeepAliveHandle, message::{BridgeDataLoadState, MessageToFrontend}, notify_signal::{KeepAliveNotifySignal, KeepAliveNotifySignalHandle},
 };
 use command::PandoraProcess;
 use futures::FutureExt;
-use relative_path::RelativePath;
 use rustc_hash::FxHashSet;
 use schema::{auxiliary::{AuxDisabledChildren, AuxiliaryContentMeta}, instance::InstanceConfiguration, loader::Loader, unique_bytes::UniqueBytes};
 use serde::{Deserialize, Serialize};
@@ -73,21 +72,6 @@ pub struct ContentFolderState {
     summaries: Option<Arc<[InstanceContentSummary]>>,
 }
 
-#[derive(enum_map::Enum, Debug, strum::EnumIter, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
-pub enum ContentFolder {
-    Mods,
-    ResourcePacks,
-}
-
-impl ContentFolder {
-    pub fn path(self) -> &'static RelativePath {
-        match self {
-            ContentFolder::Mods => RelativePath::new("mods"),
-            ContentFolder::ResourcePacks => RelativePath::new("resourcepacks"),
-        }
-    }
-}
-
 impl ContentFolderState {
     pub fn new(path: Arc<Path>) -> Self {
         Self {
@@ -147,7 +131,7 @@ impl Instance {
         dot_minecraft_path.push(".minecraft");
 
         for content_folder in ContentFolder::iter() {
-            self.content_state[content_folder].path = content_folder.path().to_path(&dot_minecraft_path).into();
+            self.content_state[content_folder].path = dot_minecraft_path.join(content_folder.folder_name()).into();
             self.mark_content_dirty(backend, content_folder, FolderChanges::all_dirty(), true);
         }
 
@@ -625,20 +609,11 @@ impl Instance {
             let should_load = state.load_state.should_load();
             drop(guard);
 
-            match content_folder {
-                ContentFolder::Mods => {
-                    backend.send.send(MessageToFrontend::InstanceModsUpdated {
-                        id,
-                        mods: Arc::clone(&result)
-                    });
-                },
-                ContentFolder::ResourcePacks => {
-                    backend.send.send(MessageToFrontend::InstanceResourcePacksUpdated {
-                        id,
-                        resource_packs: Arc::clone(&result)
-                    });
-                },
-            }
+            backend.send.send(MessageToFrontend::InstanceContentUpdated {
+                id,
+                content_folder,
+                content: Arc::clone(&result)
+            });
 
             keep_alive.notify();
             if should_load {
@@ -758,7 +733,7 @@ impl Instance {
         let server_dat_path = dot_minecraft_path.join("servers.dat");
 
         let content_state = enum_map::EnumMap::from_fn(|content_type: ContentFolder| {
-            ContentFolderState::new(content_type.path().to_path(&dot_minecraft_path).into())
+            ContentFolderState::new(dot_minecraft_path.join(content_type.folder_name()).into())
         });
 
         let icon_path = path.join("icon.png");

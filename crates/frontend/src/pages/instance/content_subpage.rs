@@ -1,7 +1,7 @@
 use std::{path::{Path, PathBuf}, sync::Arc};
 
 use bridge::{
-    handle::BackendHandle, install::{ContentDownload, ContentInstall, ContentInstallFile, InstallTarget}, instance::{InstanceContentSummary, InstanceID}, message::{BridgeDataLoadState, MessageToBackend}, serial::AtomicOptionSerial
+    handle::BackendHandle, install::{ContentDownload, ContentInstall, ContentInstallFile, InstallTarget}, instance::{ContentFolder, InstanceContentSummary, InstanceID}
 };
 use gpui::{prelude::*, *};
 use gpui_component::{
@@ -11,25 +11,69 @@ use schema::{content::ContentSource, curseforge::CurseforgeClassId, loader::Load
 use strum::IntoEnumIterator;
 use ustr::Ustr;
 
-use crate::{component::{content_list::ContentListDelegate, named_dropdown::{NamedDropdown, NamedDropdownItem}}, entity::instance::InstanceEntry, interface_config::{InstanceContentSortKey, InterfaceConfig}, root, ui::PageType};
+use crate::{component::{content_list::ContentListDelegate, named_dropdown::{NamedDropdown, NamedDropdownItem}}, entity::instance::{ContentStates, InstanceEntry}, interface_config::{InstanceContentSortKey, InterfaceConfig}, root, ui::PageType};
 
-pub struct InstanceModsSubpage {
+pub struct InstanceContentSubpage {
+    content_type: ContentType,
     instance: InstanceID,
     instance_loader: Loader,
     instance_version: Ustr,
     instance_name: SharedString,
     backend_handle: BackendHandle,
-    mods_state: BridgeDataLoadState,
-    mod_list: Entity<ListState<ContentListDelegate>>,
-    mods: Entity<Arc<[InstanceContentSummary]>>,
+    content_states: ContentStates,
+    content_list: Entity<ListState<ContentListDelegate>>,
+    content: Entity<Arc<[InstanceContentSummary]>>,
     sort_dropdown: Entity<SelectState<NamedDropdown<InstanceContentSortKey>>>,
-    load_serial: AtomicOptionSerial,
     _add_from_file_task: Option<Task<()>>,
 }
 
-impl InstanceModsSubpage {
+#[derive(Clone, Copy)]
+pub enum ContentType {
+    Mods,
+    ResourcePacks,
+}
+
+impl ContentType {
+    fn content_folder(self) -> ContentFolder {
+        match self {
+            ContentType::Mods => ContentFolder::Mods,
+            ContentType::ResourcePacks => ContentFolder::ResourcePacks,
+        }
+    }
+
+    fn title(self) -> &'static str {
+        match self {
+            ContentType::Mods => t::instance::content::mods(),
+            ContentType::ResourcePacks => t::instance::content::resourcepacks(),
+        }
+    }
+
+    fn install_select(self) -> &'static str {
+        match self {
+            ContentType::Mods => t::instance::content::install::select_mods(),
+            ContentType::ResourcePacks => t::instance::content::install::select_resourcepacks(),
+        }
+    }
+
+    fn modrinth_project_type(self) -> ModrinthProjectType {
+        match self {
+            ContentType::Mods => ModrinthProjectType::Mod,
+            ContentType::ResourcePacks => ModrinthProjectType::Resourcepack,
+        }
+    }
+
+    fn curseforge_class_id(self) -> CurseforgeClassId {
+        match self {
+            ContentType::Mods => CurseforgeClassId::Mod,
+            ContentType::ResourcePacks => CurseforgeClassId::Resourcepack,
+        }
+    }
+}
+
+impl InstanceContentSubpage {
     pub fn new(
         instance: &Entity<InstanceEntry>,
+        content_type: ContentType,
         backend_handle: BackendHandle,
         window: &mut gpui::Window,
         cx: &mut gpui::Context<Self>,
@@ -39,16 +83,16 @@ impl InstanceModsSubpage {
         let instance_version = instance.configuration.minecraft_version;
         let instance_id = instance.id;
         let instance_name = instance.name.clone();
+        let content_states = instance.content_states.clone();
 
-        let mods_state = instance.mods_state.clone();
+        let content_folder = content_type.content_folder();
+        let content = instance.content[content_folder].clone();
 
         let sort_key = InterfaceConfig::get(cx).instance_content_sort_key;
         let enabled_first = InterfaceConfig::get(cx).instance_content_sort_enabled_first;
 
-        let mut mods_list_delegate = ContentListDelegate::new(instance_id, backend_handle.clone(), instance_loader, instance_version, sort_key, enabled_first);
-        mods_list_delegate.set_content(instance.mods.read(cx));
-
-        let mods = instance.mods.clone();
+        let mut content_list_delegate = ContentListDelegate::new(instance_id, backend_handle.clone(), instance_loader, instance_version, sort_key, enabled_first);
+        content_list_delegate.set_content(content.read(cx));
 
         let sort_dropdown = cx.new(|cx| {
             let items = InstanceContentSortKey::iter().map(|key| {
@@ -60,15 +104,14 @@ impl InstanceModsSubpage {
             SelectState::new(NamedDropdown::new(items), Some(IndexPath::new(row)), window, cx)
         });
 
-        let mods_for_observe = mods.clone();
-        let mod_list = cx.new(move |cx| {
-            cx.observe(&mods_for_observe, |list: &mut ListState<ContentListDelegate>, mods, cx| {
-                let actual_mods = mods.read(cx);
-                list.delegate_mut().set_content(actual_mods);
+        let content_for_observe = content.clone();
+        let content_list = cx.new(move |cx| {
+            cx.observe(&content_for_observe, |list: &mut ListState<ContentListDelegate>, content, cx| {
+                list.delegate_mut().set_content(content.read(cx));
                 cx.notify();
             }).detach();
 
-            ListState::new(mods_list_delegate, window, cx).selectable(false).searchable(true)
+            ListState::new(content_list_delegate, window, cx).selectable(false).searchable(true)
         });
 
         cx.subscribe(&sort_dropdown, |this, _, event: &SelectEvent<NamedDropdown<InstanceContentSortKey>>, cx| {
@@ -80,32 +123,34 @@ impl InstanceModsSubpage {
             let enabled_first = InterfaceConfig::get(cx).instance_content_sort_enabled_first;
             InterfaceConfig::get_mut(cx).instance_content_sort_key = sort_key;
 
-            let mods_snapshot = this.mods.read(cx).clone();
-            let mod_list = this.mod_list.clone();
-            cx.update_entity(&mod_list, |list, cx| {
+            let content = this.content.read(cx).clone();
+            let content_list = this.content_list.clone();
+            cx.update_entity(&content_list, |list, cx| {
                 list.delegate_mut().set_sort_options(sort_key, enabled_first);
-                list.delegate_mut().set_content(mods_snapshot.as_ref());
+                list.delegate_mut().set_content(&content);
                 cx.notify();
             });
             cx.notify();
         }).detach();
 
         Self {
+            content_type,
             instance: instance_id,
             instance_loader,
             instance_version,
             instance_name,
             backend_handle,
-            mods_state,
-            mod_list,
-            mods,
+            content_states,
+            content_list,
+            content,
             sort_dropdown,
-            load_serial: AtomicOptionSerial::default(),
             _add_from_file_task: None,
         }
     }
 
     fn install_paths(&self, paths: &[PathBuf], window: &mut Window, cx: &mut App) {
+        let content_folder = self.content_type.content_folder().folder_name();
+
         let content_install = ContentInstall {
             target: InstallTarget::Instance(self.instance),
             loader_hint: self.instance_loader,
@@ -113,7 +158,7 @@ impl InstanceModsSubpage {
             files: paths.into_iter().filter_map(|path| {
                 Some(ContentInstallFile {
                     replace_old: None,
-                    path: bridge::install::ContentInstallPath::Raw(Path::new("mods").join(path.file_name()?).into()),
+                    path: bridge::install::ContentInstallPath::Raw(Path::new(content_folder).join(path.file_name()?).into()),
                     download: ContentDownload::File { path: path.clone() },
                     content_source: ContentSource::Manual,
                 })
@@ -123,20 +168,17 @@ impl InstanceModsSubpage {
     }
 }
 
-impl Render for InstanceModsSubpage {
+impl Render for InstanceContentSubpage {
     fn render(&mut self, _window: &mut gpui::Window, cx: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
         let theme = cx.theme();
 
-        self.mods_state.set_observed();
-        if self.mods_state.should_load() {
-            self.backend_handle.send_with_serial(MessageToBackend::RequestLoadMods { id: self.instance }, &self.load_serial);
-        }
+        self.content_states.observe(self.content_type.content_folder());
 
         let header = h_flex()
             .gap_3()
             .mb_1()
             .ml_1()
-            .child(div().text_lg().child(t::instance::content::mods()))
+            .child(div().text_lg().child(self.content_type.title()))
             .child(Button::new("update").label(t::instance::content::update::check::label(false)).success().compact().small().on_click({
                 let backend_handle = self.backend_handle.clone();
                 let instance_id = self.instance;
@@ -146,18 +188,20 @@ impl Render for InstanceModsSubpage {
             }))
             .child(Button::new("addmr").label(t::instance::content::install::from_modrinth()).success().compact().small().on_click({
                 let instance_name = self.instance_name.clone();
+                let project_type = self.content_type.modrinth_project_type();
                 move |_, window, cx| {
                     let page = crate::ui::PageType::Modrinth { installing_for: Some(instance_name.clone()) };
-                    InterfaceConfig::get_mut(cx).modrinth_page_project_type = ModrinthProjectType::Mod;
+                    InterfaceConfig::get_mut(cx).modrinth_page_project_type = project_type;
                     let path = &[PageType::Instances, PageType::InstancePage { name: instance_name.clone() }];
                     root::switch_page(page, path, window, cx);
                 }
             }))
             .child(Button::new("addcf").label(t::instance::content::install::from_curseforge()).success().compact().small().on_click({
                 let instance_name = self.instance_name.clone();
+                let class_id = self.content_type.curseforge_class_id();
                 move |_, window, cx| {
                     let page = crate::ui::PageType::Curseforge { installing_for: Some(instance_name.clone()) };
-                    InterfaceConfig::get_mut(cx).curseforge_page_class_id = CurseforgeClassId::Mod;
+                    InterfaceConfig::get_mut(cx).curseforge_page_class_id = class_id;
                     let path = &[PageType::Instances, PageType::InstancePage { name: instance_name.clone() }];
                     root::switch_page(page, path, window, cx);
                 }
@@ -168,7 +212,7 @@ impl Render for InstanceModsSubpage {
                         files: true,
                         directories: false,
                         multiple: true,
-                        prompt: Some(t::instance::content::install::select_mods().into())
+                        prompt: Some(this.content_type.install_select().into())
                     });
 
                     let entity = cx.entity();
@@ -205,18 +249,18 @@ impl Render for InstanceModsSubpage {
             .child(div().child(Select::new(&self.sort_dropdown).small().title_prefix("Sort: ")))
             .child(h_flex().gap_1()
                 .child(div().text_sm().child("Enabled first"))
-                .child(Switch::new("mods_enabled_first")
+                .child(Switch::new("enabled_first")
                     .checked(InterfaceConfig::get(cx).instance_content_sort_enabled_first)
                     .on_click(cx.listener(|this, checked, _, cx| {
                         let sort_key = InterfaceConfig::get(cx).instance_content_sort_key;
                         let enabled_first = *checked;
                         InterfaceConfig::get_mut(cx).instance_content_sort_enabled_first = enabled_first;
 
-                        let mods_snapshot = this.mods.read(cx).clone();
-                        let mod_list = this.mod_list.clone();
-                        cx.update_entity(&mod_list, |list, cx| {
+                        let content = this.content.read(cx).clone();
+                        let content_list = this.content_list.clone();
+                        cx.update_entity(&content_list, |list, cx| {
                             list.delegate_mut().set_sort_options(sort_key, enabled_first);
-                            list.delegate_mut().set_content(mods_snapshot.as_ref());
+                            list.delegate_mut().set_content(&content);
                             cx.notify();
                         });
                         cx.notify();
@@ -230,7 +274,7 @@ impl Render for InstanceModsSubpage {
         v_flex().p_4().size_full()
             .child(header)
             .child(div()
-                .id("mod-list-area")
+                .id("content-list-area")
                 .relative()
                 .drag_over(|style, _: &ExternalPaths, _, cx| {
                     style.bg(cx.theme().accent)
@@ -242,12 +286,12 @@ impl Render for InstanceModsSubpage {
                 .border_1()
                 .rounded(theme.radius)
                 .border_color(theme.border)
-                .child(self.mod_list.clone())
+                .child(self.content_list.clone())
                 .child(filter_bar_controls)
                 .on_click({
-                    let mod_list = self.mod_list.clone();
+                    let content_list = self.content_list.clone();
                     move |_, _, cx| {
-                        cx.update_entity(&mod_list, |list, cx| {
+                        cx.update_entity(&content_list, |list, cx| {
                             list.delegate_mut().clear_selection();
                             cx.notify();
                         })
@@ -255,9 +299,9 @@ impl Render for InstanceModsSubpage {
                 })
                 .key_context("Input")
                 .on_action({
-                    let mod_list = self.mod_list.clone();
+                    let content_list = self.content_list.clone();
                     move |_: &SelectAll, _, cx| {
-                        cx.update_entity(&mod_list, |list, cx| {
+                        cx.update_entity(&content_list, |list, cx| {
                             list.delegate_mut().select_all();
                             cx.notify();
                         })
