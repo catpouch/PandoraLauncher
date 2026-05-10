@@ -584,6 +584,11 @@ impl ContentListDelegate {
         let sort_key = self.sort_key;
 
         items.sort_by(|a, b| {
+            let ordering = a.children.len().cmp(&b.children.len()).reverse();
+            if ordering != std::cmp::Ordering::Equal {
+                return ordering;
+            }
+
             if enabled_first && a.modification.enabled != b.modification.enabled {
                 return b.modification.enabled.cmp(&a.modification.enabled);
             }
