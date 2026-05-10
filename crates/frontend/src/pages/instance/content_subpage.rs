@@ -8,7 +8,6 @@ use gpui_component::{
     ActiveTheme as _, IndexPath, Sizable, WindowExt, button::{Button, ButtonVariants}, h_flex, input::SelectAll, list::ListState, notification::{Notification, NotificationType}, select::{Select, SelectEvent, SelectState}, switch::Switch, v_flex
 };
 use schema::{content::ContentSource, curseforge::CurseforgeClassId, loader::Loader, modrinth::ModrinthProjectType};
-use strum::IntoEnumIterator;
 use ustr::Ustr;
 
 use crate::{component::{content_list::ContentListDelegate, named_dropdown::{NamedDropdown, NamedDropdownItem}}, entity::instance::{ContentStates, InstanceEntry}, interface_config::{InstanceContentSortKey, InterfaceConfig}, root, ui::PageType};
@@ -68,6 +67,51 @@ impl ContentType {
             ContentType::ResourcePacks => CurseforgeClassId::Resourcepack,
         }
     }
+
+    fn valid_sort_modes(self) -> &'static [InstanceContentSortKey] {
+        match self {
+            ContentType::Mods => &[
+                InstanceContentSortKey::Name,
+                InstanceContentSortKey::ModId,
+                InstanceContentSortKey::Filename,
+                InstanceContentSortKey::ModifiedTime,
+                InstanceContentSortKey::FileSize,
+            ],
+            ContentType::ResourcePacks => &[
+                InstanceContentSortKey::Filename,
+                InstanceContentSortKey::ModifiedTime,
+                InstanceContentSortKey::FileSize,
+            ],
+        }
+    }
+
+    fn sort_key(self, config: &InterfaceConfig) -> InstanceContentSortKey {
+        match self {
+            ContentType::Mods => config.instance_mods_sort_key,
+            ContentType::ResourcePacks => config.instance_resourcepacks_sort_key,
+        }
+    }
+
+    fn sort_enabled_first(self, config: &InterfaceConfig) -> bool {
+        match self {
+            ContentType::Mods => config.instance_mods_sort_enabled_first,
+            ContentType::ResourcePacks => config.instance_resourcepacks_sort_enabled_first,
+        }
+    }
+
+    fn set_sort_key(self, config: &mut InterfaceConfig, value: InstanceContentSortKey) {
+        match self {
+            ContentType::Mods => config.instance_mods_sort_key = value,
+            ContentType::ResourcePacks => config.instance_resourcepacks_sort_key = value,
+        }
+    }
+
+    fn set_sort_enabled_first(self, config: &mut InterfaceConfig, value: bool) {
+        match self {
+            ContentType::Mods => config.instance_mods_sort_enabled_first = value,
+            ContentType::ResourcePacks => config.instance_resourcepacks_sort_enabled_first = value,
+        }
+    }
 }
 
 impl InstanceContentSubpage {
@@ -88,19 +132,24 @@ impl InstanceContentSubpage {
         let content_folder = content_type.content_folder();
         let content = instance.content[content_folder].clone();
 
-        let sort_key = InterfaceConfig::get(cx).instance_content_sort_key;
-        let enabled_first = InterfaceConfig::get(cx).instance_content_sort_enabled_first;
+        let config = InterfaceConfig::get(cx);
+        let mut sort_key = content_type.sort_key(config);
+        let enabled_first = content_type.sort_enabled_first(config);
+
+        let valid_sort_modes = content_type.valid_sort_modes();
+        if !valid_sort_modes.contains(&sort_key) {
+            sort_key = valid_sort_modes[0];
+        }
 
         let mut content_list_delegate = ContentListDelegate::new(instance_id, backend_handle.clone(), instance_loader, instance_version, sort_key, enabled_first);
         content_list_delegate.set_content(content.read(cx));
 
         let sort_dropdown = cx.new(|cx| {
-            let items = InstanceContentSortKey::iter().map(|key| {
-                NamedDropdownItem { name: key.name(), item: key }
+            let items = valid_sort_modes.iter().map(|key| {
+                NamedDropdownItem { name: key.name(), item: *key }
             }).collect::<Vec<_>>();
 
-            let current = InterfaceConfig::get(cx).instance_content_sort_key;
-            let row = items.iter().position(|v| v.item == current).unwrap_or(0);
+            let row = items.iter().position(|v| v.item == sort_key).unwrap_or(0);
             SelectState::new(NamedDropdown::new(items), Some(IndexPath::new(row)), window, cx)
         });
 
@@ -120,8 +169,14 @@ impl InstanceContentSubpage {
             };
 
             let sort_key = value.item;
-            let enabled_first = InterfaceConfig::get(cx).instance_content_sort_enabled_first;
-            InterfaceConfig::get_mut(cx).instance_content_sort_key = sort_key;
+            let config = InterfaceConfig::get_mut(cx);
+
+            if this.content_type.sort_key(config) == sort_key {
+                return;
+            }
+
+            let enabled_first = this.content_type.sort_enabled_first(config);
+            this.content_type.set_sort_key(config, sort_key);
 
             let content = this.content.read(cx).clone();
             let content_list = this.content_list.clone();
@@ -250,11 +305,17 @@ impl Render for InstanceContentSubpage {
             .child(h_flex().gap_1()
                 .child(div().text_sm().child("Enabled first"))
                 .child(Switch::new("enabled_first")
-                    .checked(InterfaceConfig::get(cx).instance_content_sort_enabled_first)
+                    .checked(self.content_type.sort_enabled_first(InterfaceConfig::get(cx)))
                     .on_click(cx.listener(|this, checked, _, cx| {
-                        let sort_key = InterfaceConfig::get(cx).instance_content_sort_key;
+                        let config = InterfaceConfig::get_mut(cx);
                         let enabled_first = *checked;
-                        InterfaceConfig::get_mut(cx).instance_content_sort_enabled_first = enabled_first;
+
+                        if this.content_type.sort_enabled_first(config) == enabled_first {
+                            return;
+                        }
+
+                        let sort_key = this.content_type.sort_key(config);
+                        this.content_type.set_sort_enabled_first(config, enabled_first);
 
                         let content = this.content.read(cx).clone();
                         let content_list = this.content_list.clone();
