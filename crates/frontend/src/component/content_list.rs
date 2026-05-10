@@ -72,7 +72,7 @@ impl ContentListDelegate {
         }
     }
 
-    pub fn render_summary(&self, summary: &InstanceContentSummary, selected: bool, expanded: bool, can_expand: bool, ix: usize, cx: &mut Context<ListState<Self>>) -> ListItem {
+    pub fn render_summary(&self, summary: &InstanceContentSummary, selected: bool, expand_index: Option<usize>, cx: &mut Context<ListState<Self>>) -> ListItem {
         let icon = if let Some(png_icon) = summary.content_summary.png_icon.as_ref() {
             png_render_cache::render(png_icon.clone(), cx)
         } else {
@@ -228,10 +228,8 @@ impl ContentListDelegate {
             })
             .px_2();
 
-        let controls = if !can_expand {
-            toggle_control.into_any_element()
-        } else {
-            let expand_icon = if expanded {
+        let controls = if let Some(expand_index) = expand_index {
+            let expand_icon = if self.expanded.load(Ordering::Relaxed) == expand_index {
                 PandoraIcon::ArrowDown
             } else {
                 PandoraIcon::ArrowRight
@@ -239,13 +237,12 @@ impl ContentListDelegate {
 
             let expand_control = Button::new(("expand", element_id)).icon(expand_icon).compact().small().info().on_click({
                 let expanded = self.expanded.clone();
-                let index = ix+1;
                 move |_, _, _| {
                     let value = expanded.load(Ordering::Relaxed);
-                    if value == index {
+                    if value == expand_index {
                         expanded.store(0, Ordering::Relaxed);
                     } else {
-                        expanded.store(index, Ordering::Relaxed);
+                        expanded.store(expand_index, Ordering::Relaxed);
                     }
                 }
             });
@@ -255,6 +252,8 @@ impl ContentListDelegate {
                 .gap_1()
                 .child(toggle_control)
                 .child(expand_control).into_any_element()
+        } else {
+            toggle_control.into_any_element()
         };
 
         let mut item_content = h_flex()
@@ -634,7 +633,7 @@ impl ListDelegate for ContentListDelegate {
             match item {
                 SummaryOrChild::Summary(instance_mod_summary) => {
                     let selected = self.is_selected(instance_mod_summary.filename_hash);
-                    return Some(self.render_summary(instance_mod_summary, selected, false, false, ix.row, cx));
+                    return Some(self.render_summary(instance_mod_summary, selected, None, cx));
                 },
                 SummaryOrChild::Child(mod_entry_child) => {
                     return Some(self.render_child_entry(mod_entry_child, cx));
@@ -653,7 +652,13 @@ impl ListDelegate for ContentListDelegate {
 
         let summary = self.content.get(index)?;
         let selected = self.is_selected(summary.filename_hash);
-        Some(self.render_summary(summary, selected, index+1 == expanded, !self.children[index].is_empty(), ix.row, cx))
+
+        let expand_index = if self.children[index].is_empty() {
+            None
+        } else {
+            Some(index+1)
+        };
+        Some(self.render_summary(summary, selected, expand_index, cx))
 
     }
 
