@@ -1,7 +1,7 @@
 use std::{ffi::OsString, io::{Error, ErrorKind}, os::windows::ffi::{OsStrExt, OsStringExt}, path::Path};
 
 use rustc_hash::FxHashSet;
-use windows::{Win32::{Foundation::{ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS, GetLastError, HANDLE, LocalFree}, Security::{ACE_HEADER, ACL, Authorization::{ConvertSidToStringSidW, ConvertStringSidToSidW, EXPLICIT_ACCESS_W, GRANT_ACCESS, GetNamedSecurityInfoW, GetSecurityInfo, NO_MULTIPLE_TRUSTEE, SE_FILE_OBJECT, SE_WINDOW_OBJECT, SetEntriesInAclW, SetNamedSecurityInfoW, SetSecurityInfo, TRUSTEE_IS_GROUP, TRUSTEE_IS_SID}, CONTAINER_INHERIT_ACE, CreateWellKnownSid, DACL_SECURITY_INFORMATION, FreeSid, GetAce, InitializeSecurityDescriptor, Isolation::{CreateAppContainerProfile, DeriveAppContainerSidFromAppContainerName}, NO_INHERITANCE, OBJECT_INHERIT_ACE, PSECURITY_DESCRIPTOR, PSID, SECURITY_CAPABILITIES, SID_AND_ATTRIBUTES, SetFileSecurityW, SetSecurityDescriptorDacl, WELL_KNOWN_SID_TYPE, WinCapabilityInternetClientServerSid, WinCapabilityInternetClientSid, WinCapabilityPrivateNetworkClientServerSid}, Storage::FileSystem::{FILE_ALL_ACCESS, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_TRAVERSE, READ_CONTROL, WRITE_DAC}, System::{StationsAndDesktops::OpenWindowStationW, SystemServices::{SE_GROUP_ENABLED, SECURITY_DESCRIPTOR_REVISION}, Threading::{DeleteProcThreadAttributeList, InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, UpdateProcThreadAttribute}}, UI::WindowsAndMessaging::WINSTA_WRITEATTRIBUTES}, core::{HRESULT, PCWSTR, PWSTR}};
+use windows::{Win32::{Foundation::{ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS, GetLastError, HANDLE, LocalFree}, Security::{ACE_HEADER, ACL, Authorization::{ConvertSidToStringSidW, ConvertStringSidToSidW, EXPLICIT_ACCESS_W, GRANT_ACCESS, GetNamedSecurityInfoW, GetSecurityInfo, NO_MULTIPLE_TRUSTEE, SE_FILE_OBJECT, SE_WINDOW_OBJECT, SetEntriesInAclW, SetNamedSecurityInfoW, SetSecurityInfo, TRUSTEE_IS_GROUP, TRUSTEE_IS_SID}, CONTAINER_INHERIT_ACE, CreateWellKnownSid, DACL_SECURITY_INFORMATION, DeriveCapabilitySidsFromName, FreeSid, GetAce, InitializeSecurityDescriptor, Isolation::{CreateAppContainerProfile, DeriveAppContainerSidFromAppContainerName}, NO_INHERITANCE, OBJECT_INHERIT_ACE, PSECURITY_DESCRIPTOR, PSID, SECURITY_CAPABILITIES, SID_AND_ATTRIBUTES, SetFileSecurityW, SetSecurityDescriptorDacl, WELL_KNOWN_SID_TYPE, WinCapabilityInternetClientServerSid, WinCapabilityInternetClientSid, WinCapabilityPrivateNetworkClientServerSid}, Storage::FileSystem::{FILE_ALL_ACCESS, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_TRAVERSE, READ_CONTROL, WRITE_DAC}, System::{StationsAndDesktops::OpenWindowStationW, SystemServices::{SE_GROUP_ENABLED, SECURITY_DESCRIPTOR_REVISION}, Threading::{DeleteProcThreadAttributeList, InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, UpdateProcThreadAttribute}}, UI::WindowsAndMessaging::WINSTA_WRITEATTRIBUTES}, core::{HRESULT, PCWSTR, PWSTR}};
 
 use crate::{PandoraChild, PandoraCommand, PandoraSandbox, spawner::SpawnContext, windows::windows_spawn};
 
@@ -9,12 +9,6 @@ pub fn spawn(command: PandoraCommand, sandbox: PandoraSandbox, context: &mut Spa
     let app_container_sid = create_app_container(&sandbox)?;
     scopeguard::defer! {
         unsafe { FreeSid(app_container_sid) };
-    }
-
-    if sandbox.grant_winsta_writeattributes {
-        if let Err(err) = add_writeattributes_to_winsta(&app_container_sid) {
-            log::error!("Unable to set WINSTA_WRITEATTRIBUTES: {err}");
-        }
     }
 
     let mut lpsize = 0;
@@ -43,6 +37,57 @@ pub fn spawn(command: PandoraCommand, sandbox: PandoraSandbox, context: &mut Spa
             Attributes: SE_GROUP_ENABLED as u32,
         }
     }).collect::<Vec<_>>();
+
+    let winsta_sids = if sandbox.grant_winsta_writeattributes {
+        // Ideally we could just add the appcontainer's sid to winsta0 directly,
+        // but for some reason this triggers a bug in chrome.
+        // See https://github.com/Moulberry/PandoraLauncher/issues/415
+
+        let mut group_sids = std::ptr::null_mut();
+        let mut group_sid_count = 0;
+        let mut capability_sids = std::ptr::null_mut();
+        let mut capability_sid_count = 0;
+        unsafe {
+            DeriveCapabilitySidsFromName(windows::core::w!("pandora.grantWinstaWriteAttributesCapability_ikU1gY09aHdb3PsX"),
+                &mut group_sids, &mut group_sid_count, &mut capability_sids, &mut capability_sid_count)?
+        };
+
+        if capability_sid_count == 0 {
+            log::error!("DeriveCapabilitySidsFromName returned 0 for capabilitysidcount");
+        } else if capability_sids.is_null() {
+            log::error!("DeriveCapabilitySidsFromName returned null for capability_sids");
+        } else {
+            let derived_sid = unsafe { capability_sids.read() };
+            if let Err(err) = add_writeattributes_to_winsta(&derived_sid) {
+                log::error!("Unable to set WINSTA_WRITEATTRIBUTES: {err}");
+            } else {
+                capabilities.push(SID_AND_ATTRIBUTES { Sid: derived_sid, Attributes: SE_GROUP_ENABLED as u32 });
+            }
+        }
+        Some((group_sids, group_sid_count, capability_sids, capability_sid_count))
+    } else {
+        None
+    };
+
+    scopeguard::defer! {
+        // https://github.com/microsoft/Windows-universal-samples/blob/082195895276903b6630d5cb4d03c9d365ec210c/Samples/CustomCapability/Service/Server/RpcServer.cpp#L33
+        if let Some((group_sids, group_sid_count, capability_sids, capability_sid_count)) = winsta_sids {
+            if !group_sids.is_null() {
+                for i in 0..group_sid_count {
+                    let group_sid = unsafe { group_sids.offset(i as isize).read() };
+                    unsafe { LocalFree(Some(windows::Win32::Foundation::HLOCAL(group_sid.0))) };
+                }
+                unsafe { LocalFree(Some(windows::Win32::Foundation::HLOCAL(group_sids.cast()))) };
+            }
+            if !capability_sids.is_null() {
+                for i in 0..capability_sid_count {
+                    let group_sid = unsafe { capability_sids.offset(i as isize).read() };
+                    unsafe { LocalFree(Some(windows::Win32::Foundation::HLOCAL(group_sid.0))) };
+                }
+                unsafe { LocalFree(Some(windows::Win32::Foundation::HLOCAL(capability_sids.cast()))) };
+            }
+        }
+    }
 
     let mut security_capabilities = SECURITY_CAPABILITIES::default();
     security_capabilities.CapabilityCount = capabilities.len() as u32;
