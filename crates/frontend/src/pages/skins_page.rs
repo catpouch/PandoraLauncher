@@ -625,7 +625,7 @@ impl Render for SkinsPage {
                     }, |this| {
                         this.child(Button::new("delete-skin")
                             .icon(PandoraIcon::Trash2)
-                            .occlude()
+                            .block_mouse_except_scroll()
                             .danger()
                             .outline()
                             .compact()

@@ -4,7 +4,7 @@ use bridge::{instance::InstanceStatus, message::{BridgeNotificationType, Message
 use gpui::{AnyWindowHandle, App, AppContext, SharedString, TitlebarOptions, Window, WindowDecorations, WindowOptions, px, size};
 use gpui_component::{notification::{Notification, NotificationType}, Root, WindowExt};
 
-use crate::{entity::{DataEntities, account::AccountEntries, instance::InstanceEntries, metadata::FrontendMetadata}, game_output::{GameOutput, GameOutputRoot}, interface_config::InterfaceConfig, root::LauncherRoot};
+use crate::{entity::{DataEntities, account::AccountEntries, instance::{ContentStates, InstanceEntries}, metadata::FrontendMetadata}, game_output::{GameOutput, GameOutputRoot}, interface_config::InterfaceConfig, root::LauncherRoot};
 
 pub struct Processor {
     data: DataEntities,
@@ -66,8 +66,7 @@ impl Processor {
                 playtime,
                 worlds_state,
                 servers_state,
-                mods_state,
-                resource_packs_state,
+                content_states
             } => {
                 InstanceEntries::add(
                     &self.data.instances,
@@ -80,8 +79,7 @@ impl Processor {
                     playtime,
                     worlds_state,
                     servers_state,
-                    mods_state,
-                    resource_packs_state,
+                    ContentStates::new(id, content_states, self.data.backend_handle.clone()),
                     cx,
                 );
             },
@@ -138,11 +136,8 @@ impl Processor {
             MessageToFrontend::InstanceServersUpdated { id, servers } => {
                 InstanceEntries::set_servers(&self.data.instances, id, servers, cx);
             },
-            MessageToFrontend::InstanceModsUpdated { id, mods } => {
-                InstanceEntries::set_mods(&self.data.instances, id, mods, cx);
-            },
-            MessageToFrontend::InstanceResourcePacksUpdated { id, resource_packs } => {
-                InstanceEntries::set_resource_packs(&self.data.instances, id, resource_packs, cx);
+            MessageToFrontend::InstanceContentUpdated { id, content_folder, content } => {
+                InstanceEntries::set_content(&self.data.instances, id, content_folder, content, cx);
             },
             MessageToFrontend::AddNotification { .. } => {
                 self.with_main_window(message, cx, |_, message, window, cx| {

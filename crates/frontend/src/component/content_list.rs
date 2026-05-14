@@ -12,9 +12,10 @@ use gpui_component::{
 use parking_lot::Mutex;
 use rustc_hash::FxHashSet;
 use schema::{loader::Loader, text_component::FlatTextComponent};
+use strum::IntoEnumIterator;
 use ustr::Ustr;
 
-use crate::{component::error_alert::ErrorAlert, icon::PandoraIcon, interface_config::InterfaceConfig, png_render_cache};
+use crate::{component::error_alert::ErrorAlert, icon::PandoraIcon, interface_config::{InstanceContentSortKey, InterfaceConfig}, png_render_cache};
 
 #[derive(Clone)]
 struct ContentEntryChild {
@@ -22,11 +23,41 @@ struct ContentEntryChild {
     parent_filename_hash: u64,
     parent: InstanceContentID,
     path: Arc<str>,
+    filesize: u64,
     lowercase_search_keys: Arc<[Arc<str>]>,
+    disabled_default: bool,
     enabled: bool,
     parent_enabled: bool,
     disabled_third_party_downloads: bool,
     is_missing: bool,
+}
+
+impl ContentEntryChild {
+    pub fn compare_by(&self, other: &ContentEntryChild, key: InstanceContentSortKey) -> std::cmp::Ordering {
+        match key {
+            InstanceContentSortKey::Name => {
+                let name_a = self.summary.name.as_deref().or(self.summary.id.as_deref()).unwrap_or(&*self.path);
+                let name_b = other.summary.name.as_deref().or(other.summary.id.as_deref()).unwrap_or(&*other.path);
+                lexical_sort::natural_lexical_cmp(name_a, name_b)
+            },
+            InstanceContentSortKey::ModId => {
+                let name_a = self.summary.id.as_deref().or(self.summary.name.as_deref()).unwrap_or(&*self.path);
+                let name_b = other.summary.id.as_deref().or(other.summary.name.as_deref()).unwrap_or(&*other.path);
+                lexical_sort::natural_lexical_cmp(name_a, name_b)
+            },
+            InstanceContentSortKey::Filename => {
+                let name_a = &*self.path;
+                let name_b = &*other.path;
+                lexical_sort::natural_lexical_cmp(name_a, name_b)
+            },
+            InstanceContentSortKey::ModifiedTime => {
+                std::cmp::Ordering::Equal
+            },
+            InstanceContentSortKey::FileSize => {
+                self.filesize.cmp(&other.filesize).reverse()
+            },
+        }
+    }
 }
 
 enum SummaryOrChild {
@@ -39,6 +70,8 @@ pub struct ContentListDelegate {
     for_loader: Loader,
     for_version: Ustr,
     backend_handle: BackendHandle,
+    sort_key: InstanceContentSortKey,
+    enabled_first: bool,
     content: Vec<InstanceContentSummary>,
     searched: Option<Vec<SummaryOrChild>>,
     children: Vec<Vec<ContentEntryChild>>,
@@ -52,12 +85,21 @@ pub struct ContentListDelegate {
 }
 
 impl ContentListDelegate {
-    pub fn new(id: InstanceID, backend_handle: BackendHandle, for_loader: Loader, for_version: Ustr) -> Self {
+    pub fn new(
+        id: InstanceID,
+        backend_handle: BackendHandle,
+        for_loader: Loader,
+        for_version: Ustr,
+        sort_key: InstanceContentSortKey,
+        enabled_first: bool,
+    ) -> Self {
         Self {
             id,
             for_loader,
             for_version,
             backend_handle,
+            sort_key,
+            enabled_first,
             content: Vec::new(),
             searched: None,
             children: Vec::new(),
@@ -71,7 +113,12 @@ impl ContentListDelegate {
         }
     }
 
-    pub fn render_summary(&self, summary: &InstanceContentSummary, selected: bool, expanded: bool, can_expand: bool, ix: usize, cx: &mut Context<ListState<Self>>) -> ListItem {
+    pub fn set_sort_options(&mut self, sort_key: InstanceContentSortKey, enabled_first: bool) {
+        self.sort_key = sort_key;
+        self.enabled_first = enabled_first;
+    }
+
+    pub fn render_summary(&self, summary: &InstanceContentSummary, selected: bool, expand_index: Option<usize>, cx: &mut Context<ListState<Self>>) -> ListItem {
         let icon = if let Some(png_icon) = summary.content_summary.png_icon.as_ref() {
             png_render_cache::render(png_icon.clone(), cx)
         } else {
@@ -227,10 +274,8 @@ impl ContentListDelegate {
             })
             .px_2();
 
-        let controls = if !can_expand {
-            toggle_control.into_any_element()
-        } else {
-            let expand_icon = if expanded {
+        let controls = if let Some(expand_index) = expand_index {
+            let expand_icon = if self.expanded.load(Ordering::Relaxed) == expand_index {
                 PandoraIcon::ArrowDown
             } else {
                 PandoraIcon::ArrowRight
@@ -238,13 +283,12 @@ impl ContentListDelegate {
 
             let expand_control = Button::new(("expand", element_id)).icon(expand_icon).compact().small().info().on_click({
                 let expanded = self.expanded.clone();
-                let index = ix+1;
                 move |_, _, _| {
                     let value = expanded.load(Ordering::Relaxed);
-                    if value == index {
+                    if value == expand_index {
                         expanded.store(0, Ordering::Relaxed);
                     } else {
-                        expanded.store(index, Ordering::Relaxed);
+                        expanded.store(expand_index, Ordering::Relaxed);
                     }
                 }
             });
@@ -254,6 +298,8 @@ impl ContentListDelegate {
                 .gap_1()
                 .child(toggle_control)
                 .child(expand_control).into_any_element()
+        } else {
+            toggle_control.into_any_element()
         };
 
         let mut item_content = h_flex()
@@ -389,6 +435,7 @@ impl ContentListDelegate {
                             let child_id = child.summary.id.clone();
                             let child_name = child.summary.name.clone();
                             let path = child.path.clone();
+                            let disabled_default = child.disabled_default;
                             let backend_handle = self.backend_handle.clone();
                             move |checked, _, _| {
                                 backend_handle.send(MessageToBackend::SetContentChildEnabled {
@@ -397,6 +444,7 @@ impl ContentListDelegate {
                                     child_id: child_id.clone(),
                                     child_name: child_name.clone(),
                                     child_filename: path.clone(),
+                                    disabled_default,
                                     enabled: *checked,
                                 });
                             }
@@ -436,105 +484,162 @@ impl ContentListDelegate {
     pub fn set_content(&mut self, new_content: &[InstanceContentSummary]) {
         let last_mods_len = self.content.len();
 
-        let mut mods = Vec::with_capacity(new_content.len());
-        let mut children = Vec::with_capacity(new_content.len());
+        struct Item {
+            modification: InstanceContentSummary,
+            children: Vec<ContentEntryChild>,
+        }
+
+        let mut items = Vec::with_capacity(new_content.len());
 
         for modification in new_content.iter() {
-            mods.push(modification.clone());
+            let mut inner_children = Vec::new();
 
-            if let ContentType::ModrinthModpack { downloads, summaries, .. } = &modification.content_summary.extra {
-                let mut inner_children = Vec::new();
-                for (index, download) in downloads.iter().enumerate() {
-                    if !download.path.starts_with("mods/") {
-                        continue;
-                    }
+            let extra = &modification.content_summary.extra;
+            let files = if let ContentType::ModrinthModpack { files, .. } = extra {
+                Some(files)
+            } else if let ContentType::CurseforgeModpack { unknown_files, files, .. } = &extra {
+                for unknown_file in unknown_files.iter() {
+                    let filename: Arc<str> = format!("File ID: {}", unknown_file.file_id).into();
 
-                    let summary = summaries.get(index).cloned().flatten();
-                    let is_missing = summary.is_none();
-                    let summary = summary.unwrap_or(UNKNOWN_CONTENT_SUMMARY.clone());
-
-                    let enabled = if let Some(id) = &summary.id && modification.disabled_children.disabled_ids.contains(id) {
-                        false
-                    } else if let Some(name) = &summary.name && modification.disabled_children.disabled_names.contains(name) {
-                        false
-                    } else {
-                        !modification.disabled_children.disabled_filenames.contains(&*download.path)
-                    };
-
-                    let lowercase_filename: Arc<str> = download.path.to_lowercase().into();
-
-                    let lowercase_search_keys = summary.id.clone().into_iter()
-                        .chain(summary.name.clone().into_iter())
-                        .chain(std::iter::once(lowercase_filename))
-                        .collect();
+                    let lowercase_filename: Arc<str> = filename.to_ascii_lowercase().into();
+                    let lowercase_search_keys = Arc::new([lowercase_filename]);
 
                     inner_children.push(ContentEntryChild {
-                        summary,
-                        parent_filename_hash: modification.filename_hash,
-                        parent: modification.id,
-                        lowercase_search_keys,
-                        path: download.path.clone(),
-                        enabled,
-                        parent_enabled: modification.enabled,
-                        disabled_third_party_downloads: false,
-                        is_missing,
-                    });
-                }
-                inner_children.sort_by(|a, b| {
-                    lexical_sort::natural_lexical_cmp(&a.lowercase_search_keys.last().unwrap(), &b.lowercase_search_keys.last().unwrap())
-                });
-                children.push(inner_children);
-            } else if let ContentType::CurseforgeModpack { files, summaries, .. } = &modification.content_summary.extra {
-                let mut inner_children = Vec::new();
-                for (index, download) in files.iter().enumerate() {
-                    let (summary, cached_info) = summaries.get(index).cloned().unwrap_or((None, None));
-
-                    let is_missing = summary.is_none();
-                    let summary = summary.unwrap_or(UNKNOWN_CONTENT_SUMMARY.clone());
-
-                    let filename: Arc<str> = if let Some(cached_info) = &cached_info {
-                        cached_info.filename.clone()
-                    } else {
-                        format!("File ID: {}", download.file_id).into()
-                    };
-
-                    let enabled = if let Some(id) = &summary.id && modification.disabled_children.disabled_ids.contains(id) {
-                        false
-                    } else if let Some(name) = &summary.name && modification.disabled_children.disabled_names.contains(name) {
-                        false
-                    } else {
-                        !modification.disabled_children.disabled_filenames.contains(&*filename)
-                    };
-
-                    let lowercase_filename: Arc<str> = filename.to_lowercase().into();
-                    let lowercase_search_keys = summary.id.clone().into_iter()
-                        .chain(summary.name.clone().into_iter())
-                        .chain(std::iter::once(lowercase_filename))
-                        .collect();
-
-                    let disabled_third_party_downloads = cached_info.as_ref()
-                        .map(|info| info.disabled_third_party_downloads).unwrap_or(false);
-
-                    inner_children.push(ContentEntryChild {
-                        summary,
+                        summary: UNKNOWN_CONTENT_SUMMARY.clone(),
                         parent_filename_hash: modification.filename_hash,
                         parent: modification.id,
                         lowercase_search_keys,
                         path: filename,
+                        filesize: 0,
+                        disabled_default: false,
+                        enabled: true,
+                        parent_enabled: modification.enabled,
+                        disabled_third_party_downloads: false,
+                        is_missing: true,
+                    });
+                }
+
+                Some(files)
+            } else {
+                None
+            };
+
+            if let Some(files) = files {
+                for file in files.iter() {
+                    if let Some(path) = file.path() && !path.starts_with("mods") && !path.starts_with("resourcepacks") {
+                        continue;
+                    }
+
+                    let summary = file.summary.clone();
+
+                    let mut id = None;
+                    let mut name = None;
+
+                    if let Some(content_summary) = &summary {
+                        id = content_summary.id.as_ref().map(|s| &**s);
+                        name = content_summary.name.as_ref().map(|s| &**s);
+                    }
+
+                    let enabled = modification.disabled_children.is_enabled(file.default_disabled, id, name, file.path.as_str());
+
+                    let is_missing = summary.is_none();
+                    let summary = summary.unwrap_or(UNKNOWN_CONTENT_SUMMARY.clone());
+
+                    let lowercase_filename: Arc<str> = file.path.as_str().to_ascii_lowercase().into();
+
+                    let lowercase_search_keys = summary.id.clone().into_iter()
+                        .chain(summary.name.clone().into_iter())
+                        .chain(std::iter::once(lowercase_filename))
+                        .collect();
+
+                    let filesize = match &file.source {
+                        bridge::instance::ModpackFileSource::DownloadUrl { size, .. } => *size as u64,
+                        bridge::instance::ModpackFileSource::DownloadCurseforge { .. } => 0,
+                        bridge::instance::ModpackFileSource::Builtin { bytes } => bytes.len() as u64,
+                    };
+
+                    inner_children.push(ContentEntryChild {
+                        summary,
+                        parent_filename_hash: modification.filename_hash,
+                        parent: modification.id,
+                        lowercase_search_keys,
+                        path: file.path.as_str().into(),
+                        filesize,
+                        disabled_default: file.default_disabled,
                         enabled,
                         parent_enabled: modification.enabled,
-                        disabled_third_party_downloads,
+                        disabled_third_party_downloads: file.disabled_third_party_downloads,
                         is_missing,
                     });
                 }
-                inner_children.sort_by(|a, b| {
-                    lexical_sort::natural_lexical_cmp(&a.lowercase_search_keys.last().unwrap(), &b.lowercase_search_keys.last().unwrap())
-                });
-                children.push(inner_children);
-            } else {
-                children.push(Vec::new());
             }
+
+            items.push(Item {
+                modification: modification.clone(),
+                children: inner_children,
+            });
         }
+
+        let enabled_first = self.enabled_first;
+        let sort_key = self.sort_key;
+
+        items.sort_by(|a, b| {
+            let ordering = a.children.len().cmp(&b.children.len()).reverse();
+            if ordering != std::cmp::Ordering::Equal {
+                return ordering;
+            }
+
+            if enabled_first && a.modification.enabled != b.modification.enabled {
+                return b.modification.enabled.cmp(&a.modification.enabled);
+            }
+
+            let ordering = sort_key.compare(&a.modification, &b.modification);
+            if ordering != std::cmp::Ordering::Equal {
+                return ordering;
+            }
+
+            for key in InstanceContentSortKey::iter() {
+                if key == sort_key {
+                    continue;
+                }
+
+                let ordering = key.compare(&a.modification, &b.modification);
+                if ordering != std::cmp::Ordering::Equal {
+                    return ordering;
+                }
+            }
+
+            return std::cmp::Ordering::Equal;
+        });
+
+        for item in &mut items {
+            item.children.sort_by(|a, b| {
+                if enabled_first && a.enabled != b.enabled {
+                    return b.enabled.cmp(&a.enabled);
+                }
+
+                let ordering = a.compare_by(b, sort_key);
+                if ordering != std::cmp::Ordering::Equal {
+                    return ordering;
+                }
+
+                for key in InstanceContentSortKey::iter() {
+                    if key == sort_key {
+                        continue;
+                    }
+
+                    let ordering = a.compare_by(b, key);
+                    if ordering != std::cmp::Ordering::Equal {
+                        return ordering;
+                    }
+                }
+
+                return std::cmp::Ordering::Equal;
+            });
+        }
+
+        let mods: Vec<_> = items.iter().map(|i| i.modification.clone()).collect();
+        let children: Vec<_> = items.into_iter().map(|i| i.children).collect();
 
         let mut updating = self.updating.lock();
         if !updating.is_empty() {
@@ -645,7 +750,7 @@ impl ListDelegate for ContentListDelegate {
             match item {
                 SummaryOrChild::Summary(instance_mod_summary) => {
                     let selected = self.is_selected(instance_mod_summary.filename_hash);
-                    return Some(self.render_summary(instance_mod_summary, selected, false, false, ix.row, cx));
+                    return Some(self.render_summary(instance_mod_summary, selected, None, cx));
                 },
                 SummaryOrChild::Child(mod_entry_child) => {
                     return Some(self.render_child_entry(mod_entry_child, cx));
@@ -664,7 +769,13 @@ impl ListDelegate for ContentListDelegate {
 
         let summary = self.content.get(index)?;
         let selected = self.is_selected(summary.filename_hash);
-        Some(self.render_summary(summary, selected, index+1 == expanded, !self.children[index].is_empty(), ix.row, cx))
+
+        let expand_index = if self.children[index].is_empty() {
+            None
+        } else {
+            Some(index+1)
+        };
+        Some(self.render_summary(summary, selected, expand_index, cx))
 
     }
 

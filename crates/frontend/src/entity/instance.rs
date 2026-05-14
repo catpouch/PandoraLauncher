@@ -1,8 +1,7 @@
 use std::{path::Path, sync::Arc};
 
 use bridge::{
-    instance::{InstanceContentSummary, InstanceID, InstancePlaytime, InstanceServerSummary, InstanceStatus, InstanceWorldSummary},
-    message::BridgeDataLoadState,
+    handle::BackendHandle, instance::{ContentFolder, InstanceContentSummary, InstanceID, InstancePlaytime, InstanceServerSummary, InstanceStatus, InstanceWorldSummary}, message::{BridgeDataLoadState, MessageToBackend}, serial::AtomicOptionSerial
 };
 use gpui::{prelude::*, *};
 use gpui_component::select::SelectItem;
@@ -25,8 +24,7 @@ impl InstanceEntries {
         playtime: InstancePlaytime,
         worlds_state: BridgeDataLoadState,
         servers_state: BridgeDataLoadState,
-        mods_state: BridgeDataLoadState,
-        resource_packs_state: BridgeDataLoadState,
+        content_states: ContentStates,
         cx: &mut App,
     ) {
         entity.update(cx, |entries, cx| {
@@ -44,10 +42,8 @@ impl InstanceEntries {
                 worlds: cx.new(|_| [].into()),
                 servers_state,
                 servers: cx.new(|_| [].into()),
-                mods_state,
-                mods: cx.new(|_| [].into()),
-                resource_packs_state,
-                resource_packs: cx.new(|_| [].into()),
+                content_states,
+                content: enum_map::EnumMap::from_fn(|_| cx.new(|_| [].into())),
             };
             instance.title = instance.create_title();
 
@@ -159,25 +155,12 @@ impl InstanceEntries {
         });
     }
 
-    pub fn set_mods(entity: &Entity<Self>, id: InstanceID, mods: Arc<[InstanceContentSummary]>, cx: &mut App) {
+    pub fn set_content(entity: &Entity<Self>, id: InstanceID, content_folder: ContentFolder, content: Arc<[InstanceContentSummary]>, cx: &mut App) {
         entity.update(cx, |entries, cx| {
             if let Some(instance) = entries.entries.get_mut(&id) {
                 instance.update(cx, |instance, cx| {
-                    instance.mods.update(cx, |existing_mods, cx| {
-                        *existing_mods = mods;
-                        cx.notify();
-                    })
-                });
-            }
-        });
-    }
-
-    pub fn set_resource_packs(entity: &Entity<Self>, id: InstanceID, resource_packs: Arc<[InstanceContentSummary]>, cx: &mut App) {
-        entity.update(cx, |entries, cx| {
-            if let Some(instance) = entries.entries.get_mut(&id) {
-                instance.update(cx, |instance, cx| {
-                    instance.resource_packs.update(cx, |existing_resource_packs, cx| {
-                        *existing_resource_packs = resource_packs;
+                    instance.content[content_folder].update(cx, |existing_content, cx| {
+                        *existing_content = content;
                         cx.notify();
                     })
                 });
@@ -224,10 +207,51 @@ pub struct InstanceEntry {
     pub worlds: Entity<Arc<[InstanceWorldSummary]>>,
     pub servers_state: BridgeDataLoadState,
     pub servers: Entity<Arc<[InstanceServerSummary]>>,
-    pub mods_state: BridgeDataLoadState,
-    pub mods: Entity<Arc<[InstanceContentSummary]>>,
-    pub resource_packs_state: BridgeDataLoadState,
-    pub resource_packs: Entity<Arc<[InstanceContentSummary]>>,
+    pub content_states: ContentStates,
+    pub content: enum_map::EnumMap<ContentFolder, Entity<Arc<[InstanceContentSummary]>>>,
+}
+
+#[derive(Clone)]
+pub struct ContentStates {
+    instance_id: InstanceID,
+    backend_handle: BackendHandle,
+    load_state: enum_map::EnumMap<ContentFolder, (BridgeDataLoadState, AtomicOptionSerial)>,
+}
+
+impl ContentStates {
+    pub fn new(instance_id: InstanceID, states: enum_map::EnumMap<ContentFolder, BridgeDataLoadState>, backend_handle: BackendHandle) -> Self {
+        Self {
+            instance_id,
+            backend_handle,
+            load_state: states.map(|_, load_state| (load_state, AtomicOptionSerial::default())),
+        }
+    }
+
+    pub fn observe(&self, content_folder: ContentFolder) {
+        let (load_state, serial) = &self.load_state[content_folder];
+
+        load_state.set_observed();
+        if load_state.should_load() {
+            let message = MessageToBackend::RequestLoadContentFolder {
+                id: self.instance_id,
+                content_folder
+            };
+            self.backend_handle.send_with_serial(message, serial);
+        }
+    }
+
+    pub fn observe_all(&self) {
+        for (content_folder, (load_state, serial)) in &self.load_state {
+            load_state.set_observed();
+            if load_state.should_load() {
+                let message = MessageToBackend::RequestLoadContentFolder {
+                    id: self.instance_id,
+                    content_folder
+                };
+                self.backend_handle.send_with_serial(message, serial);
+            }
+        }
+    }
 }
 
 impl SelectItem for InstanceEntry {
@@ -260,7 +284,7 @@ impl InstanceEntry {
     fn create_title(&self) -> SharedString {
         let lower = self.name.to_ascii_lowercase();
 
-        let loader_string = self.configuration.loader.name();
+        let loader_string = self.configuration.loader.pretty_name();
         let loader_string_lower = loader_string.to_ascii_lowercase();
         let contains_loader = lower.contains(&loader_string_lower);
 

@@ -13,8 +13,7 @@ use uuid::Uuid;
 
 use crate::{
     account::Account, game_output::GameOutputLogLevel, import::{ImportFromOtherLauncherJob, OtherLauncher}, install::ContentInstall, instance::{
-        InstanceContentID, InstanceContentSummary, InstanceID, InstancePlaytime, InstanceServerSummary, InstanceStatus,
-        InstanceWorldSummary,
+        ContentFolder, InstanceContentID, InstanceContentSummary, InstanceID, InstancePlaytime, InstanceServerSummary, InstanceStatus, InstanceWorldSummary
     }, keep_alive::KeepAliveHandle, meta::{MetadataRequest, MetadataResult}, modal_action::ModalAction,
 };
 
@@ -45,7 +44,6 @@ pub struct ExportCurseforgeOptions {
     pub version: Arc<str>,
     pub author: Option<Arc<str>>,
     pub recommended_ram: Option<u32>,
-    pub optional_files: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -161,11 +159,9 @@ pub enum MessageToBackend {
         from_index: usize,
         to_index: usize,
     },
-    RequestLoadMods {
+    RequestLoadContentFolder {
         id: InstanceID,
-    },
-    RequestLoadResourcePacks {
-        id: InstanceID,
+        content_folder: ContentFolder,
     },
     SetContentEnabled {
         id: InstanceID,
@@ -178,6 +174,7 @@ pub enum MessageToBackend {
         child_id: Option<Arc<str>>,
         child_name: Option<Arc<str>>,
         child_filename: Arc<str>,
+        disabled_default: bool,
         enabled: bool,
     },
     DownloadContentChildren {
@@ -191,6 +188,10 @@ pub enum MessageToBackend {
     },
     InstallContent {
         content: ContentInstall,
+        modal_action: ModalAction,
+    },
+    CreateInstanceFromFile {
+        file: PathBuf,
         modal_action: ModalAction,
     },
     DownloadAllMetadata,
@@ -318,8 +319,7 @@ pub enum MessageToFrontend {
         playtime: InstancePlaytime,
         worlds_state: BridgeDataLoadState,
         servers_state: BridgeDataLoadState,
-        mods_state: BridgeDataLoadState,
-        resource_packs_state: BridgeDataLoadState,
+        content_states: enum_map::EnumMap<ContentFolder, BridgeDataLoadState>,
     },
     InstanceRemoved {
         id: InstanceID,
@@ -346,13 +346,10 @@ pub enum MessageToFrontend {
         id: InstanceID,
         servers: Arc<[InstanceServerSummary]>,
     },
-    InstanceModsUpdated {
+    InstanceContentUpdated {
         id: InstanceID,
-        mods: Arc<[InstanceContentSummary]>,
-    },
-    InstanceResourcePacksUpdated {
-        id: InstanceID,
-        resource_packs: Arc<[InstanceContentSummary]>,
+        content_folder: ContentFolder,
+        content: Arc<[InstanceContentSummary]>,
     },
     CreateGameOutputWindow {
         receiver: tokio::sync::mpsc::UnboundedReceiver<GameOutputMsg>

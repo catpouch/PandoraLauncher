@@ -6,12 +6,11 @@ use anyhow::Context;
 use base64::Engine;
 use bridge::{
     instance::{
-        ContentSummary, ContentUpdateContext, ContentUpdateStatus, InstanceContentID, InstanceContentSummary, InstanceID, InstancePlaytime, InstanceServerSummary, InstanceStatus, InstanceWorldSummary
+        ContentFolder, ContentSummary, ContentUpdateContext, ContentUpdateStatus, InstanceContentID, InstanceContentSummary, InstanceID, InstancePlaytime, InstanceServerSummary, InstanceStatus, InstanceWorldSummary
     }, keep_alive::KeepAliveHandle, message::{BridgeDataLoadState, MessageToFrontend}, notify_signal::{KeepAliveNotifySignal, KeepAliveNotifySignalHandle},
 };
 use command::PandoraProcess;
 use futures::FutureExt;
-use relative_path::RelativePath;
 use rustc_hash::FxHashSet;
 use schema::{auxiliary::{AuxDisabledChildren, AuxiliaryContentMeta}, instance::InstanceConfiguration, loader::Loader, unique_bytes::UniqueBytes};
 use serde::{Deserialize, Serialize};
@@ -73,21 +72,6 @@ pub struct ContentFolderState {
     summaries: Option<Arc<[InstanceContentSummary]>>,
 }
 
-#[derive(enum_map::Enum, Debug, strum::EnumIter, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
-pub enum ContentFolder {
-    Mods,
-    ResourcePacks,
-}
-
-impl ContentFolder {
-    pub fn path(self) -> &'static RelativePath {
-        match self {
-            ContentFolder::Mods => RelativePath::new("mods"),
-            ContentFolder::ResourcePacks => RelativePath::new("resourcepacks"),
-        }
-    }
-}
-
 impl ContentFolderState {
     pub fn new(path: Arc<Path>) -> Self {
         Self {
@@ -147,7 +131,7 @@ impl Instance {
         dot_minecraft_path.push(".minecraft");
 
         for content_folder in ContentFolder::iter() {
-            self.content_state[content_folder].path = content_folder.path().to_path(&dot_minecraft_path).into();
+            self.content_state[content_folder].path = dot_minecraft_path.join(content_folder.folder_name()).into();
             self.mark_content_dirty(backend, content_folder, FolderChanges::all_dirty(), true);
         }
 
@@ -618,6 +602,39 @@ impl Instance {
                 };
             }
 
+            if content_folder == ContentFolder::Shaders && !result.is_empty() && !this.configuration.get().show_shader_tab {
+                this.configuration.modify(|config| {
+                    config.show_shader_tab = true;
+                });
+            } else if content_folder == ContentFolder::Mods && !this.configuration.get().show_shader_tab {
+                let mut has_shader_mod = false;
+                'out: for summary in &result {
+                    if let Some(id) = summary.content_summary.id.as_deref() {
+                        if crate::KNOWN_SHADER_MODS.contains(&id) {
+                            has_shader_mod = true;
+                            break 'out;
+                        }
+                    }
+                    if let Some(modpack_files) = summary.content_summary.extra.modpack_files() {
+                        for modpack_file in modpack_files.iter() {
+                            if let Some(summary) = &modpack_file.summary {
+                                if let Some(id) = summary.id.as_deref() {
+                                    if crate::KNOWN_SHADER_MODS.contains(&id) {
+                                        has_shader_mod = true;
+                                        break 'out;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if has_shader_mod {
+                    this.configuration.modify(|config| {
+                        config.show_shader_tab = true;
+                    });
+                }
+            }
+
             let result: Arc<[InstanceContentSummary]> = result.into();
             state.summaries = Some(result.clone());
             state.pending_load = None;
@@ -625,20 +642,11 @@ impl Instance {
             let should_load = state.load_state.should_load();
             drop(guard);
 
-            match content_folder {
-                ContentFolder::Mods => {
-                    backend.send.send(MessageToFrontend::InstanceModsUpdated {
-                        id,
-                        mods: Arc::clone(&result)
-                    });
-                },
-                ContentFolder::ResourcePacks => {
-                    backend.send.send(MessageToFrontend::InstanceResourcePacksUpdated {
-                        id,
-                        resource_packs: Arc::clone(&result)
-                    });
-                },
-            }
+            backend.send.send(MessageToFrontend::InstanceContentUpdated {
+                id,
+                content_folder,
+                content: Arc::clone(&result)
+            });
 
             keep_alive.notify();
             if should_load {
@@ -758,7 +766,7 @@ impl Instance {
         let server_dat_path = dot_minecraft_path.join("servers.dat");
 
         let content_state = enum_map::EnumMap::from_fn(|content_type: ContentFolder| {
-            ContentFolderState::new(content_type.path().to_path(&dot_minecraft_path).into())
+            ContentFolderState::new(dot_minecraft_path.join(content_type.folder_name()).into())
         });
 
         let icon_path = path.join("icon.png");
@@ -996,7 +1004,21 @@ fn create_instance_content_summary(path: &Path, mod_metadata_manager: &Arc<ModMe
         return None;
     };
 
-    let summary = mod_metadata_manager.get_file(&mut file);
+    let metadata = file.metadata().ok();
+    let modified_unix_ms = if let Some(metadata) = &metadata {
+        let mut time = SystemTime::UNIX_EPOCH;
+        if let Ok(created) = metadata.created() {
+            time = time.max(created);
+        }
+        if let Ok(modified) = metadata.modified() {
+            time = time.max(modified);
+        }
+        time.duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_millis().min(u64::MAX as u128) as u64
+    } else {
+        0
+    };
+
+    let summary = mod_metadata_manager.get_file(&mut file, metadata, path.extension());
 
     let filename_without_disabled = if !enabled {
         &filename[..filename.len()-".disabled".len()]
@@ -1037,6 +1059,7 @@ fn create_instance_content_summary(path: &Path, mod_metadata_manager: &Arc<ModMe
         lowercase_search_keys,
         filename,
         filename_hash,
+        modified_unix_ms,
         path: path.into(),
         can_toggle: true,
         enabled,
@@ -1076,11 +1099,12 @@ fn try_load_resourcepack_folder(pack_mcmeta_bytes: &[u8], pack_png_bytes: Option
         lowercase_search_keys,
         filename,
         filename_hash,
+        modified_unix_ms: 0,
         path: path.into(),
         can_toggle: false,
         enabled: true,
         content_source: schema::content::ContentSource::Manual,
-        update: ContentUpdateContext::new(ContentUpdateStatus::ManualInstall, Loader::Unknown, ""),
+        update: ContentUpdateContext::new(ContentUpdateStatus::ManualInstall, Loader::Vanilla, ""),
         disabled_children: Default::default(),
     });
 }
