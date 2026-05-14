@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use strum::EnumIter;
 use ustr::Ustr;
 
+use crate::loader::Loader;
+
 pub const MODRINTH_SEARCH_URL: &str = "https://api.modrinth.com/v2/search";
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -80,7 +82,7 @@ pub struct ModrinthHit {
     // pub featured_gallery: Option<Arc<str>>,
 }
 
-#[derive(PartialEq, Eq, Debug, Copy, Clone, Deserialize)]
+#[derive(PartialEq, Eq, Debug, Copy, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ModrinthSideRequirement {
     Required,
@@ -103,13 +105,20 @@ pub enum ModrinthProjectType {
 }
 
 impl ModrinthProjectType {
-    pub fn as_str(&self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             ModrinthProjectType::Mod => "mod",
             ModrinthProjectType::Modpack => "modpack",
             ModrinthProjectType::Resourcepack => "resourcepack",
             ModrinthProjectType::Shader => "shader",
             ModrinthProjectType::Other => "other",
+        }
+    }
+
+    pub fn mod_or_modpack(self) -> bool {
+        match self {
+            Self::Mod | Self::Modpack => true,
+            _ => false,
         }
     }
 }
@@ -215,6 +224,19 @@ impl ModrinthLoader {
             _ => Self::Unknown,
         }
     }
+
+    pub fn as_pandora(self) -> Option<Loader> {
+        match self {
+            ModrinthLoader::Fabric => Some(Loader::Fabric),
+            ModrinthLoader::Forge => Some(Loader::Forge),
+            ModrinthLoader::NeoForge => Some(Loader::NeoForge),
+            ModrinthLoader::Minecraft => None,
+            ModrinthLoader::Iris => None,
+            ModrinthLoader::Optifine => None,
+            ModrinthLoader::Canvas => None,
+            ModrinthLoader::Unknown => None,
+        }
+    }
 }
 
 #[derive(Debug, Copy, Clone, Deserialize, PartialEq, Eq)]
@@ -248,13 +270,32 @@ pub struct ModrinthFile {
     pub size: usize,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ModrinthHashes {
     pub sha1: Arc<str>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha512: Option<Arc<str>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ModrinthVersionFileUpdateResult(pub ModrinthProjectVersion);
+
+#[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize)]
+pub struct ModrinthVersionsFromHashesRequest {
+    pub hashes: Arc<[Arc<str>]>,
+    pub algorithm: Arc<str>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ModrinthVersionsFromHashesResponse(pub std::collections::HashMap<Arc<str>, Option<ModrinthProjectVersion>>);
+
+#[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize)]
+pub struct ModrinthProjectsRequest {
+    pub ids: Arc<[Arc<str>]>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ModrinthProjectsResponse(pub Arc<[ModrinthProjectResult]>);
 
 pub const MODRINTH_PROJECT_URL: &str = "https://api.modrinth.com/v2/project";
 

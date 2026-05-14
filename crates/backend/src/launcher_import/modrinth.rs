@@ -65,10 +65,7 @@ pub fn import_instances_from_modrinth(backend: &BackendState, import_job: Import
         let game_version: String = row.get(2)?;
         let mod_loader: String = row.get(3)?;
 
-        let mut loader = Loader::from_name(&mod_loader);
-        if loader == Loader::Unknown {
-            loader = Loader::Vanilla;
-        }
+        let loader = Loader::from_name(&mod_loader).unwrap_or(Loader::Vanilla);
 
         let instance_configuration = InstanceConfiguration::new(game_version.into(), loader);
 
@@ -146,6 +143,7 @@ pub fn read_profiles_from_modrinth_db(modrinth: &Path) -> rusqlite::Result<Optio
     let app_db = modrinth.join("app.db");
 
     if !app_db.exists() {
+        log::warn!("app.db doesn't exist in modrinth folder");
         return Ok(None);
     }
 
@@ -162,6 +160,8 @@ pub fn read_profiles_from_modrinth_db(modrinth: &Path) -> rusqlite::Result<Optio
         let profile = profiles.join(path);
         if profile.is_dir() {
             paths.push(profile.into());
+        } else {
+            log::warn!("Modrinth profile folder {:?} doesn't exist", profile);
         }
     }
 

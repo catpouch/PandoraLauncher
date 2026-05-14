@@ -1,19 +1,19 @@
 use std::{collections::BTreeSet, ops::Range, sync::{Arc, atomic::AtomicBool}, time::Duration};
 
-use bridge::{install::{ContentDownload, ContentInstall, ContentInstallFile, InstallTarget}, instance::{ContentUpdateStatus, InstanceContentID, InstanceID}, message::{BridgeDataLoadState, MessageToBackend}, meta::MetadataRequest, modal_action::ModalAction, serial::AtomicOptionSerial};
+use bridge::{install::{ContentDownload, ContentInstall, ContentInstallFile, InstallTarget}, instance::{ContentFolder, ContentUpdateStatus, InstanceContentID, InstanceID}, message::MessageToBackend, meta::MetadataRequest, modal_action::ModalAction};
 use enumset::EnumSet;
 use gpui::{prelude::*, *};
 use gpui_component::{
     ActiveTheme, Selectable, WindowExt, button::{Button, ButtonGroup, ButtonVariant, ButtonVariants}, checkbox::Checkbox, h_flex, input::{Input, InputEvent, InputState}, notification::NotificationType, scroll::{ScrollableElement, Scrollbar}, skeleton::Skeleton, v_flex
 };
 use rustc_hash::FxHashMap;
-use schema::{content::ContentSource, curseforge::{CurseforgeClassId, CurseforgeHit, CurseforgeSearchRequest, CurseforgeSearchResult, CurseforgeSortField}, loader::Loader};
+use schema::{content::{ContentInstallReason, ContentSource}, curseforge::{CurseforgeClassId, CurseforgeHit, CurseforgeSearchRequest, CurseforgeSearchResult, CurseforgeSortField}, loader::Loader};
 use strum::IntoEnumIterator;
 use ustr::Ustr;
 
 use crate::{
     component::error_alert::ErrorAlert, entity::{
-        DataEntities, metadata::{AsMetadataResult, FrontendMetadata, FrontendMetadataResult}
+        DataEntities, instance::ContentStates, metadata::{AsMetadataResult, FrontendMetadata, FrontendMetadataResult}
     }, icon::PandoraIcon, interface_config::InterfaceConfig, pages::page::Page,
 };
 
@@ -35,27 +35,29 @@ pub struct CurseforgeSearchPage {
     show_categories: Arc<AtomicBool>,
     show_sort: Arc<AtomicBool>,
     can_install_latest: bool,
-    installed_mods_by_project: FxHashMap<u32, Vec<InstalledMod>>,
+    specific_installed_content_by_project: enum_map::EnumMap<ContentFolder, FxHashMap<u32, Vec<InstalledContent>>>,
+    all_installed_content_by_project: FxHashMap<u32, Vec<InstalledContent>>,
     last_search: Arc<str>,
     scroll_handle: UniformListScrollHandle,
     search_error: Option<SharedString>,
     image_cache: Entity<RetainAllImageCache>,
-    mods_load_state: Option<(BridgeDataLoadState, AtomicOptionSerial)>
+    content_states: Option<ContentStates>,
 }
 
-pub struct InstalledMod {
-    pub mod_id: InstanceContentID,
+#[derive(Clone, Copy)]
+pub struct InstalledContent {
+    pub content_id: InstanceContentID,
     pub status: ContentUpdateStatus
 }
 
 pub fn get_primary_action(
     project_id: u32,
     can_install_latest: bool,
-    installed_mods_by_project: &FxHashMap<u32, Vec<InstalledMod>>,
+    installed_content_by_project: &FxHashMap<u32, Vec<InstalledContent>>,
     cx: &App,
 ) -> PrimaryAction {
     let install_latest = can_install_latest && InterfaceConfig::get(cx).content_install_latest;
-    let installed = installed_mods_by_project.get(&project_id);
+    let installed = installed_content_by_project.get(&project_id);
 
     if let Some(installed) = installed && !installed.is_empty() {
         if !install_latest {
@@ -63,8 +65,8 @@ pub fn get_primary_action(
         }
 
         let mut action = PrimaryAction::CheckForUpdates;
-        for installed_mod in installed {
-            match installed_mod.status {
+        for installed_content in installed {
+            match installed_content.status {
                 ContentUpdateStatus::Unknown => {},
                 ContentUpdateStatus::AlreadyUpToDate => {
                     if !matches!(action, PrimaryAction::Update(..)) {
@@ -73,9 +75,9 @@ pub fn get_primary_action(
                 },
                 ContentUpdateStatus::Curseforge => {
                     if let PrimaryAction::Update(vec) = &mut action {
-                        vec.push(installed_mod.mod_id);
+                        vec.push(installed_content.content_id);
                     } else {
-                        action = PrimaryAction::Update(vec![installed_mod.mod_id]);
+                        action = PrimaryAction::Update(vec![installed_content.content_id]);
                     }
                 },
                 _ => {
@@ -115,49 +117,71 @@ impl CurseforgeSearchPage {
         });
 
         let mut can_install_latest = false;
-        let mut installed_mods_by_project: FxHashMap<u32, Vec<InstalledMod>> = FxHashMap::default();
+        let mut specific_installed_content_by_project: enum_map::EnumMap<ContentFolder, FxHashMap<u32, Vec<InstalledContent>>> = Default::default();
+        let mut all_installed_content_by_project: FxHashMap<u32, Vec<InstalledContent>> = FxHashMap::default();
         let mut filter_version = None;
 
-        let mut mods_load_state = None;
+        let mut content_states = None;
         if let Some(install_for) = install_for {
             if let Some(entry) = data.instances.read(cx).entries.get(&install_for) {
                 let instance = entry.read(cx);
+                content_states = Some(instance.content_states.clone());
+                let instance_content = instance.content.clone();
                 let loader = instance.configuration.loader;
                 let minecraft_version = instance.configuration.minecraft_version;
                 can_install_latest = loader != Loader::Vanilla;
                 filter_version = Some(minecraft_version);
 
-                let mods = instance.mods.read(cx);
-                for summary in mods.iter() {
-                    let ContentSource::CurseforgeProject { project_id: project } = summary.content_source else {
-                        continue;
-                    };
+                for content_folder in ContentFolder::iter() {
+                    let mut specific_installed_content: FxHashMap<u32, Vec<InstalledContent>> = FxHashMap::default();
 
-                    let installed = installed_mods_by_project.entry(project).or_default();
-                    installed.push(InstalledMod {
-                        mod_id: summary.id,
-                        status: summary.update.status_if_matches(loader, minecraft_version.as_str()),
-                    })
-                }
-
-                mods_load_state = Some((instance.mods_state.clone(), AtomicOptionSerial::default()));
-
-                let mods = instance.mods.clone();
-                cx.observe(&mods, move |page, entity, cx| {
-                    page.installed_mods_by_project.clear();
-                    let mods = entity.read(cx);
-                    for summary in mods.iter() {
+                    for summary in instance_content[content_folder].read(cx).iter() {
                         let ContentSource::CurseforgeProject { project_id: project } = summary.content_source else {
                             continue;
                         };
 
-                        let installed = page.installed_mods_by_project.entry(project).or_default();
-                        installed.push(InstalledMod {
-                            mod_id: summary.id,
+                        let installed_content = InstalledContent {
+                            content_id: summary.id,
                             status: summary.update.status_if_matches(loader, minecraft_version.as_str()),
-                        })
+                        };
+
+                        let installed = all_installed_content_by_project.entry(project).or_default();
+                        installed.push(installed_content);
+
+                        let installed = specific_installed_content.entry(project).or_default();
+                        installed.push(installed_content);
                     }
-                }).detach();
+
+                    specific_installed_content_by_project[content_folder] = specific_installed_content;
+
+                    let content = instance_content[content_folder].clone();
+                    cx.observe(&content, move |page, entity, cx| {
+                        let specific = &mut page.specific_installed_content_by_project[content_folder];
+
+                        specific.clear();
+
+                        let content = entity.read(cx);
+                        for summary in content.iter() {
+                            let ContentSource::CurseforgeProject { project_id: project } = summary.content_source else {
+                                continue;
+                            };
+
+                            let installed = specific.entry(project).or_default();
+                            installed.push(InstalledContent {
+                                content_id: summary.id,
+                                status: summary.update.status_if_matches(loader, minecraft_version.as_str()),
+                            })
+                        }
+
+                        page.all_installed_content_by_project.clear();
+                        for content_folder in ContentFolder::iter() {
+                            for (key, value) in &page.specific_installed_content_by_project[content_folder] {
+                                let installed = page.all_installed_content_by_project.entry(*key).or_default();
+                                installed.extend_from_slice(value.as_slice());
+                            }
+                        }
+                    }).detach();
+                }
             }
         }
 
@@ -181,12 +205,13 @@ impl CurseforgeSearchPage {
             show_categories: Arc::new(AtomicBool::new(false)),
             show_sort: Arc::new(AtomicBool::new(false)),
             can_install_latest,
-            installed_mods_by_project,
+            specific_installed_content_by_project,
+            all_installed_content_by_project,
             last_search: Arc::from(""),
             scroll_handle: UniformListScrollHandle::new(),
             search_error: None,
             image_cache: RetainAllImageCache::new(cx),
-            mods_load_state,
+            content_states,
         };
         page.load_more(cx);
         page
@@ -312,7 +337,7 @@ impl CurseforgeSearchPage {
                 if i > 0 {
                     string.push_str("\",\"");
                 }
-                string.push_str(loader.name());
+                string.push_str(loader.pretty_name());
             }
             string.push_str("\"]");
             let string: Arc<str> = string.into();
@@ -513,8 +538,8 @@ impl CurseforgeSearchPage {
 
                                         let content_install = ContentInstall {
                                             target: InstallTarget::Instance(instance.id),
-                                            loader_hint: loader,
-                                            version_hint: Some(minecraft_version.into()),
+                                            loader,
+                                            minecraft_version,
                                             files: [
                                                 ContentInstallFile {
                                                     replace_old: None,
@@ -526,6 +551,7 @@ impl CurseforgeSearchPage {
                                                     content_source: ContentSource::CurseforgeProject {
                                                         project_id: hit.id
                                                     },
+                                                    reason: ContentInstallReason::Standalone,
                                                 }
                                             ].into(),
                                         };
@@ -622,7 +648,7 @@ impl CurseforgeSearchPage {
     }
 
     pub fn get_primary_action(&self, project_id: u32, cx: &App) -> PrimaryAction {
-        get_primary_action(project_id, self.can_install_latest, &self.installed_mods_by_project, cx)
+        get_primary_action(project_id, self.can_install_latest, &self.all_installed_content_by_project, cx)
     }
 }
 
@@ -692,13 +718,8 @@ impl Render for CurseforgeSearchPage {
 
         let item_count = self.hits.len() + if can_load_more || self.search_error.is_some() { 1 } else { 0 };
 
-        if let Some((mods_state, load_serial)) = &self.mods_load_state
-            && let Some(install_for) = self.install_for
-        {
-            mods_state.set_observed();
-            if mods_state.should_load() {
-                self.data.backend_handle.send_with_serial(MessageToBackend::RequestLoadMods { id: install_for }, load_serial);
-            }
+        if let Some(content_states) = &self.content_states {
+            content_states.observe_all();
         }
 
         let list = h_flex()

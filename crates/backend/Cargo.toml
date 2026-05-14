@@ -1,13 +1,14 @@
 [package]
 name = "backend"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 
 [dependencies]
 auth.workspace = true
 tokio.workspace = true
 serde.workspace = true
 sha1.workspace = true
+sha2.workspace = true
 ustr.workspace = true
 schema.workspace = true
 nbt.workspace = true
@@ -52,6 +53,7 @@ tar.workspace = true
 runas.workspace = true
 rusqlite.workspace = true
 walkdir.workspace = true
+zip.workspace = true
 url.workspace = true
 crc32fast.workspace = true
 scopeguard.workspace = true

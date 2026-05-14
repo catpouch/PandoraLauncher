@@ -1,5 +1,6 @@
-use std::{io::Write, path::Path, sync::Arc, time::Duration};
+use std::{cmp::Ordering, io::Write, path::Path, sync::Arc, time::Duration};
 
+use bridge::instance::InstanceContentSummary;
 use gpui::{App, SharedString, Task};
 use rand::RngCore;
 use schema::{curseforge::CurseforgeClassId, modrinth::ModrinthProjectType};
@@ -31,6 +32,18 @@ pub struct InterfaceConfig {
     pub quick_delete_mods: bool,
     #[serde(default, deserialize_with = "schema::try_deserialize")]
     pub quick_delete_instance: bool,
+    #[serde(default, deserialize_with = "schema::try_deserialize")]
+    pub instance_mods_sort_key: InstanceContentSortKey,
+    #[serde(default, deserialize_with = "schema::try_deserialize")]
+    pub instance_mods_sort_enabled_first: bool,
+    #[serde(default, deserialize_with = "schema::try_deserialize")]
+    pub instance_resourcepacks_sort_key: InstanceContentSortKey,
+    #[serde(default, deserialize_with = "schema::try_deserialize")]
+    pub instance_resourcepacks_sort_enabled_first: bool,
+    #[serde(default, deserialize_with = "schema::try_deserialize")]
+    pub instance_shaders_sort_key: InstanceContentSortKey,
+    #[serde(default, deserialize_with = "schema::try_deserialize")]
+    pub instance_shaders_sort_enabled_first: bool,
     #[serde(default = "schema::default_true", deserialize_with = "schema::try_deserialize")]
     pub content_install_latest: bool,
     #[serde(default, deserialize_with = "schema::try_deserialize")]
@@ -43,6 +56,8 @@ pub struct InterfaceConfig {
     pub hide_main_window_on_launch: bool,
     #[serde(default, deserialize_with = "schema::try_deserialize")]
     pub quit_on_main_closed: bool,
+    #[serde(default, deserialize_with = "schema::try_deserialize")]
+    pub use_os_titlebar: bool,
     #[serde(default, deserialize_with = "schema::try_deserialize")]
     pub hide_usernames: bool,
     #[serde(default, deserialize_with = "schema::try_deserialize")]
@@ -59,6 +74,55 @@ pub struct InterfaceConfig {
     pub collapse_capes_in_skins_page: bool,
     #[serde(default = "schema::default_true", deserialize_with = "schema::try_deserialize")]
     pub skin_list_show_3d: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, strum::EnumIter)]
+#[serde(rename_all = "lowercase")]
+pub enum InstanceContentSortKey {
+    #[default]
+    Name,
+    ModId,
+    Filename,
+    ModifiedTime,
+    FileSize,
+}
+
+impl InstanceContentSortKey {
+    pub fn name(self) -> SharedString {
+        match self {
+            InstanceContentSortKey::Name => "Name".into(),
+            InstanceContentSortKey::ModId => "Mod Id".into(),
+            InstanceContentSortKey::Filename => "Filename".into(),
+            InstanceContentSortKey::ModifiedTime => "Modified Time".into(),
+            InstanceContentSortKey::FileSize => "Filesize".into(),
+        }
+    }
+
+    pub fn compare(self, a: &InstanceContentSummary, b: &InstanceContentSummary) -> Ordering {
+        match self {
+            InstanceContentSortKey::Name => {
+                let name_a = a.content_summary.name.as_deref().or(a.content_summary.id.as_deref()).unwrap_or(&*a.filename);
+                let name_b = b.content_summary.name.as_deref().or(b.content_summary.id.as_deref()).unwrap_or(&*b.filename);
+                lexical_sort::natural_lexical_cmp(name_a, name_b)
+            },
+            InstanceContentSortKey::ModId => {
+                let name_a = a.content_summary.id.as_deref().or(a.content_summary.name.as_deref()).unwrap_or(&*a.filename);
+                let name_b = b.content_summary.id.as_deref().or(b.content_summary.name.as_deref()).unwrap_or(&*b.filename);
+                lexical_sort::natural_lexical_cmp(name_a, name_b)
+            },
+            InstanceContentSortKey::Filename => {
+                let name_a = &*a.filename;
+                let name_b = &*b.filename;
+                lexical_sort::natural_lexical_cmp(name_a, name_b)
+            },
+            InstanceContentSortKey::ModifiedTime => {
+                a.modified_unix_ms.cmp(&b.modified_unix_ms).reverse()
+            },
+            InstanceContentSortKey::FileSize => {
+                a.content_summary.filesize.unwrap_or(0).cmp(&b.content_summary.filesize.unwrap_or(0)).reverse()
+            },
+        }
+    }
 }
 
 fn default_modrinth_project_type() -> ModrinthProjectType {
@@ -79,12 +143,19 @@ impl Default for InterfaceConfig {
             page_path: Default::default(),
             quick_delete_mods: Default::default(),
             quick_delete_instance: Default::default(),
+            instance_mods_sort_key: Default::default(),
+            instance_mods_sort_enabled_first: Default::default(),
+            instance_resourcepacks_sort_key: Default::default(),
+            instance_resourcepacks_sort_enabled_first: Default::default(),
+            instance_shaders_sort_key: Default::default(),
+            instance_shaders_sort_enabled_first: Default::default(),
             content_install_latest: true,
             content_filter_version: Default::default(),
             modrinth_page_project_type: default_modrinth_project_type(),
             curseforge_page_class_id: default_curseforge_class_id(),
             hide_main_window_on_launch: false,
             quit_on_main_closed: false,
+            use_os_titlebar: false,
             hide_server_addresses: false,
             hide_usernames: false,
             hide_skins: false,

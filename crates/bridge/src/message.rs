@@ -13,8 +13,7 @@ use uuid::Uuid;
 
 use crate::{
     account::Account, game_output::GameOutputLogLevel, import::{ImportFromOtherLauncherJob, OtherLauncher}, install::ContentInstall, instance::{
-        InstanceContentID, InstanceContentSummary, InstanceID, InstancePlaytime, InstanceServerSummary, InstanceStatus,
-        InstanceWorldSummary,
+        ContentFolder, InstanceContentID, InstanceContentSummary, InstanceID, InstancePlaytime, InstanceServerSummary, InstanceStatus, InstanceWorldSummary
     }, keep_alive::KeepAliveHandle, meta::{MetadataRequest, MetadataResult}, modal_action::ModalAction,
 };
 
@@ -23,6 +22,41 @@ use crate::{
 pub struct BackendConfigWithPassword {
     pub config: BackendConfig,
     pub proxy_password: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExportFormat {
+    Zip,
+    Modrinth,
+    Curseforge,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExportModrinthOptions {
+    pub name: Arc<str>,
+    pub version: Arc<str>,
+    pub summary: Option<Arc<str>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExportCurseforgeOptions {
+    pub name: Arc<str>,
+    pub version: Arc<str>,
+    pub author: Option<Arc<str>>,
+    pub recommended_ram: Option<u32>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExportOptions {
+    pub include_saves: bool,
+    pub include_mods: bool,
+    pub include_resourcepacks: bool,
+    pub include_configs: bool,
+    pub include_logs: bool,
+    pub include_cache: bool,
+    pub include_synced: bool,
+    pub modrinth: ExportModrinthOptions,
+    pub curseforge: ExportCurseforgeOptions,
 }
 
 pub enum MessageToBackend {
@@ -38,6 +72,13 @@ pub enum MessageToBackend {
     },
     DeleteInstance {
         id: InstanceID,
+    },
+    ExportInstance {
+        id: InstanceID,
+        format: ExportFormat,
+        options: ExportOptions,
+        output: PathBuf,
+        modal_action: ModalAction,
     },
     RenameInstance {
         id: InstanceID,
@@ -118,11 +159,9 @@ pub enum MessageToBackend {
         from_index: usize,
         to_index: usize,
     },
-    RequestLoadMods {
+    RequestLoadContentFolder {
         id: InstanceID,
-    },
-    RequestLoadResourcePacks {
-        id: InstanceID,
+        content_folder: ContentFolder,
     },
     SetContentEnabled {
         id: InstanceID,
@@ -135,6 +174,7 @@ pub enum MessageToBackend {
         child_id: Option<Arc<str>>,
         child_name: Option<Arc<str>>,
         child_filename: Arc<str>,
+        disabled_default: bool,
         enabled: bool,
     },
     DownloadContentChildren {
@@ -148,6 +188,10 @@ pub enum MessageToBackend {
     },
     InstallContent {
         content: ContentInstall,
+        modal_action: ModalAction,
+    },
+    CreateInstanceFromFile {
+        file: PathBuf,
         modal_action: ModalAction,
     },
     DownloadAllMetadata,
@@ -275,8 +319,7 @@ pub enum MessageToFrontend {
         playtime: InstancePlaytime,
         worlds_state: BridgeDataLoadState,
         servers_state: BridgeDataLoadState,
-        mods_state: BridgeDataLoadState,
-        resource_packs_state: BridgeDataLoadState,
+        content_states: enum_map::EnumMap<ContentFolder, BridgeDataLoadState>,
     },
     InstanceRemoved {
         id: InstanceID,
@@ -303,13 +346,10 @@ pub enum MessageToFrontend {
         id: InstanceID,
         servers: Arc<[InstanceServerSummary]>,
     },
-    InstanceModsUpdated {
+    InstanceContentUpdated {
         id: InstanceID,
-        mods: Arc<[InstanceContentSummary]>,
-    },
-    InstanceResourcePacksUpdated {
-        id: InstanceID,
-        resource_packs: Arc<[InstanceContentSummary]>,
+        content_folder: ContentFolder,
+        content: Arc<[InstanceContentSummary]>,
     },
     CreateGameOutputWindow {
         receiver: tokio::sync::mpsc::UnboundedReceiver<GameOutputMsg>
